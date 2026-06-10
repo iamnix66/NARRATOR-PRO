@@ -3,11 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { GoogleGenAI, Content, HarmCategory, HarmBlockThreshold } from "@google/genai";
+import { GoogleGenAI, Content, HarmCategory, HarmBlockThreshold, Type } from "@google/genai";
 import mammoth from "mammoth";
 import confetti from "canvas-confetti";
 import { AnimatePresence, motion } from "motion/react";
-import { Copy, History, Loader2, RotateCcw, Sparkles, Wand2, PlusCircle, Import, X, Trash2, RefreshCcw, ChevronLeft, ChevronRight, BookOpen, PenTool, Search, LayoutList, FileText, CheckCircle2, ChevronDown, ChevronUp, Clock, PlayCircle, ListChecks, AlertCircle, Download, Save, Edit3 } from "lucide-react";
+import { Copy, History, Loader2, RotateCcw, Sparkles, Wand2, PlusCircle, Import, X, Trash2, RefreshCcw, ChevronLeft, ChevronRight, BookOpen, PenTool, Search, LayoutList, FileText, CheckCircle2, ChevronDown, ChevronUp, Clock, PlayCircle, ListChecks, AlertCircle, Download, Save, Edit3, Eye, MessageSquare } from "lucide-react";
 import { useState, useCallback, useRef, useEffect } from "react";
 import Markdown from "react-markdown";
 import { saveAs } from 'file-saver';
@@ -58,12 +58,32 @@ interface NarrativeSection {
   selectedNarrativeIndex?: number;
 }
 
+interface ProposedSuspenseOption {
+  id: string;
+  title: string;
+  description: string;
+  pros: string[];
+  cons: string[];
+  preservationRule: string;
+}
+
 interface SuspenseDeclaration {
   primaryType: string;
   secondaryType?: string;
   withheldInformation: string;
   revealWindow: string;
   strictExclusions: string;
+}
+
+interface OutlineViolation {
+  id: string;
+  sectionNumber: number;
+  bulletIndex: number;
+  violationType: string;
+  violatingPhrase: string;
+  explanation: string;
+  originalBulletText: string;
+  correctedBulletText: string;
 }
 
 
@@ -173,12 +193,44 @@ export default function App() {
   const [outlineText, setOutlineText] = useState("");
   const [outlineFile, setOutlineFile] = useState<{data: string, mimeType: string} | null>(null);
   const [sections, setSections] = useState<NarrativeSection[]>([]);
+  const [uncorrectedSections, setUncorrectedSections] = useState<NarrativeSection[]>([]);
+  const [selectedOutlineType, setSelectedOutlineType] = useState<"uncorrected" | "corrected">("corrected");
+
   const [outlinePlan, setOutlinePlan] = useState("");
   const [violationsAudit, setViolationsAudit] = useState("");
   const [reconstructedOutlineViolationsReport, setReconstructedOutlineViolationsReport] = useState("");
+  const [outlineViolations, setOutlineViolations] = useState<OutlineViolation[]>([]);
+  const [checkedViolationIds, setCheckedViolationIds] = useState<string[]>([]);
   const [suspenseDeclaration, setSuspenseDeclaration] = useState<SuspenseDeclaration | null>(null);
   const [narratorIsProcessing, setNarratorIsProcessing] = useState(false);
-  const [currentNarratorStep, setCurrentNarratorStep] = useState<"idle" | "parsed" | "researched" | "planned" | "detected" | "narrating" | "refined" | "doublechecked" | "corrected">("idle");
+  const [currentNarratorStep, setCurrentNarratorStep] = useState<"idle" | "parsed" | "researched" | "suspensed" | "planned" | "detected" | "narrating" | "refined" | "doublechecked" | "corrected">("idle");
+
+  // Suspense Detection State Variables
+  const [suspenseOptions, setSuspenseOptions] = useState<ProposedSuspenseOption[]>([]);
+  const [selectedSuspenseOptionId, setSelectedSuspenseOptionId] = useState<string | null>(null);
+  const [suspenseDialogue, setSuspenseDialogue] = useState<Content[]>([]);
+  const [suspenseUserText, setSuspenseUserText] = useState("");
+  const [customSuspenseBrief, setCustomSuspenseBrief] = useState("");
+
+  // Custom Correction State Variables
+  const [customCorrectionUserText, setCustomCorrectionUserText] = useState("");
+  const [customCorrectionDialogue, setCustomCorrectionDialogue] = useState<Content[]>([]);
+
+  const activeSections = (selectedOutlineType === "uncorrected" && uncorrectedSections.length > 0 && (currentNarratorStep === "corrected" || currentNarratorStep === "narrating")) ? uncorrectedSections : sections;
+
+  const updateActiveSections = (updater: NarrativeSection[] | ((prev: NarrativeSection[]) => NarrativeSection[])) => {
+    if (selectedOutlineType === "uncorrected" && uncorrectedSections.length > 0 && (currentNarratorStep === "corrected" || currentNarratorStep === "narrating")) {
+      setUncorrectedSections(prev => {
+        const nextVal = typeof updater === "function" ? updater(prev) : updater;
+        return nextVal;
+      });
+    } else {
+      setSections(prev => {
+        const nextVal = typeof updater === "function" ? updater(prev) : updater;
+        return nextVal;
+      });
+    }
+  };
   const [outlineSource, setOutlineSource] = useState<"scratch" | "existing" | null>(null);
   const [scratchTopic, setScratchTopic] = useState("");
   const [scratchResearchDossier, setScratchResearchDossier] = useState("");
@@ -200,14 +252,41 @@ export default function App() {
   const [isEditingPlan, setIsEditingPlan] = useState(false);
   const [isEditingAudit, setIsEditingAudit] = useState(false);
   const [isEditingSuspense, setIsEditingSuspense] = useState(false);
+  const [showTechnicalAuditReport, setShowTechnicalAuditReport] = useState(false);
   
   const [maxReachedStep, setMaxReachedStep] = useState<string>("idle");
 
-  const steps = mode === "outlining" 
-    ? ["idle", "parsed", "researched", "planned", "detected", "refined", "doublechecked", "corrected"]
-    : ["idle", "parsed", "researched", "refined"];
+  const [isNarratingAll, setIsNarratingAll] = useState(false);
+
+  const steps = ["idle", "parsed", "researched", "suspensed", "planned", "detected", "refined", "doublechecked", "corrected"];
 
   const resultRef = useRef<HTMLDivElement>(null);
+  const suspenseTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const customCorrectionTextareaRef = useRef<HTMLTextAreaElement>(null);
+
+  const activeSectionsRef = useRef(activeSections);
+  useEffect(() => {
+    activeSectionsRef.current = activeSections;
+  }, [activeSections]);
+
+  const chatHistoryRef = useRef(narratorChatHistory);
+  useEffect(() => {
+    chatHistoryRef.current = narratorChatHistory;
+  }, [narratorChatHistory]);
+
+  useEffect(() => {
+    if (suspenseTextareaRef.current) {
+      suspenseTextareaRef.current.style.height = "auto";
+      suspenseTextareaRef.current.style.height = `${suspenseTextareaRef.current.scrollHeight}px`;
+    }
+  }, [suspenseUserText]);
+
+  useEffect(() => {
+    if (customCorrectionTextareaRef.current) {
+      customCorrectionTextareaRef.current.style.height = "auto";
+      customCorrectionTextareaRef.current.style.height = `${customCorrectionTextareaRef.current.scrollHeight}px`;
+    }
+  }, [customCorrectionUserText]);
 
   // Persistence: Load from localStorage
   useEffect(() => {
@@ -223,8 +302,36 @@ export default function App() {
     const savedNarrate = localStorage.getItem(NARRATOR_STORAGE_KEY);
     if (savedNarrate) {
       try {
-        const { sections: savedSections, step: savedStep, history, mode: savedMode, plan: savedPlan, suspense: savedSuspense, audit: savedAudit, reconstructedAudit: savedReconstructedAudit, outlineSource: savedSource, maxStep: savedMax, outlinerStrategy: savedStrategy, userResearchText: savedRText, userResearchFileName: savedRFName, userResearchSource: savedRSource, scratchResearchDossier: savedScratchResearch } = JSON.parse(savedNarrate);
+        const { 
+          sections: savedSections, 
+          uncorrectedSections: savedUncorrected, 
+          selectedOutlineType: savedType, 
+          step: savedStep, 
+          history, 
+          mode: savedMode, 
+          plan: savedPlan, 
+          suspense: savedSuspense, 
+          audit: savedAudit, 
+          reconstructedAudit: savedReconstructedAudit, 
+          outlineSource: savedSource, 
+          maxStep: savedMax, 
+          outlinerStrategy: savedStrategy, 
+          userResearchText: savedRText, 
+          userResearchFileName: savedRFName, 
+          userResearchSource: savedRSource, 
+          scratchResearchDossier: savedScratchResearch, 
+          outlineViolations: savedViolations, 
+          checkedViolationIds: savedCheckedIds,
+          suspenseOptions: savedSuspenseOptions,
+          selectedSuspenseOptionId: savedSelectedSuspenseOptionId,
+          suspenseDialogue: savedSuspenseDialogue,
+          customSuspenseBrief: savedCustomSuspenseBrief,
+          customCorrectionDialogue: savedCustomCorrectionDialogue,
+          customCorrectionUserText: savedCustomCorrectionUserText
+        } = JSON.parse(savedNarrate);
         if (savedSections) setSections(savedSections);
+        if (savedUncorrected) setUncorrectedSections(savedUncorrected);
+        if (savedType) setSelectedOutlineType(savedType);
         if (savedStep) setCurrentNarratorStep(savedStep);
         if (history) setNarratorChatHistory(history);
         if (savedMode) setMode(savedMode);
@@ -239,6 +346,14 @@ export default function App() {
         if (savedRFName) setUserResearchFileName(savedRFName);
         if (savedRSource) setUserResearchSource(savedRSource);
         if (savedScratchResearch) setScratchResearchDossier(savedScratchResearch);
+        if (savedViolations) setOutlineViolations(savedViolations);
+        if (savedCheckedIds) setCheckedViolationIds(savedCheckedIds);
+        if (savedSuspenseOptions) setSuspenseOptions(savedSuspenseOptions);
+        if (savedSelectedSuspenseOptionId) setSelectedSuspenseOptionId(savedSelectedSuspenseOptionId);
+        if (savedSuspenseDialogue) setSuspenseDialogue(savedSuspenseDialogue);
+        if (savedCustomSuspenseBrief) setCustomSuspenseBrief(savedCustomSuspenseBrief);
+        if (savedCustomCorrectionDialogue) setCustomCorrectionDialogue(savedCustomCorrectionDialogue);
+        if (savedCustomCorrectionUserText) setCustomCorrectionUserText(savedCustomCorrectionUserText);
       } catch (e) { console.error(e); }
     }
   }, []);
@@ -254,6 +369,8 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(NARRATOR_STORAGE_KEY, JSON.stringify({
       sections,
+      uncorrectedSections,
+      selectedOutlineType,
       step: currentNarratorStep,
       history: narratorChatHistory,
       mode,
@@ -267,9 +384,17 @@ export default function App() {
       userResearchText,
       userResearchFileName,
       userResearchSource,
-      scratchResearchDossier
+      scratchResearchDossier,
+      outlineViolations,
+      checkedViolationIds,
+      suspenseOptions,
+      selectedSuspenseOptionId,
+      suspenseDialogue,
+      customSuspenseBrief,
+      customCorrectionDialogue,
+      customCorrectionUserText
     }));
-  }, [sections, currentNarratorStep, narratorChatHistory, mode, outlinePlan, suspenseDeclaration, violationsAudit, reconstructedOutlineViolationsReport, outlineSource, maxReachedStep, outlinerStrategy, userResearchText, userResearchFileName, userResearchSource, scratchResearchDossier]);
+  }, [sections, uncorrectedSections, selectedOutlineType, currentNarratorStep, narratorChatHistory, mode, outlinePlan, suspenseDeclaration, violationsAudit, reconstructedOutlineViolationsReport, outlineSource, maxReachedStep, outlinerStrategy, userResearchText, userResearchFileName, userResearchSource, scratchResearchDossier, outlineViolations, checkedViolationIds, suspenseOptions, selectedSuspenseOptionId, suspenseDialogue, customSuspenseBrief, customCorrectionDialogue, customCorrectionUserText]);
 
   // --- Narrator Logic ---
 
@@ -336,7 +461,7 @@ export default function App() {
         return {
           ...section,
           id: section.id || `section_${Math.random().toString(36).substr(2, 9)}`,
-          estimatedWordCount: parsedWordCount || section.estimatedWordCount || (section as any).targetWordCount || 500,
+          estimatedWordCount: parsedWordCount || section.estimatedWordCount || (section as any).targetWordCount || 1500,
           bullets: section.bullets || [],
           exclusions: section.exclusions || []
         };
@@ -534,6 +659,244 @@ TASK: You MUST extract all relevant facts, names, events, and background info fr
     }
   };
 
+  const handleDetectSuspense = async (currentSections: NarrativeSection[]) => {
+    setNarratorIsProcessing(true);
+    setError(null);
+    try {
+      const isScratch = outlineSource === "scratch";
+      const researchData = currentSections.map(s => `
+SECTION: ${s.title}
+RESEARCH DOSSIER:
+${s.researchBrief || "N/A"}
+      `).join("\n\n---\n\n");
+
+      const prompt = `CASE TOPIC / TITLE: ${isScratch ? scratchTopic : (currentSections[0]?.title || "This Case")}
+ORIGINAL OUTLINE / DETAILS:
+${isScratch ? scratchResearchDossier : outlineText}
+
+RESEARCH DATA:
+${researchData}
+
+TASK:
+Analyze the case facts above. Outline 2 or 3 distinct and highly engaging narrative suspense strategies for this story.
+For example, in a poisoning case of Mary Yoder (where his ex-girlfriend frames his son Adam):
+- Strategy 1: "Identity Withheld (Whodunit)" (where we initially believe Adam is 100% guilty because the email and car poison are presented without foreshadowing/commentary as true; Kaitlyn's identity and setup are carefully withheld until the investigators discover the logs/DNA later in an omniscient real-time reveal).
+- Strategy 2: "Unknown Illness & Unknown Cause" (Mary dies of undetermined cause, Adam is first suspected, everyone is in the dark, then forensic lab reveals colchicine, tracking down the source, climax twist).
+- Strategy 3: "The Double Cover-up / Tension-driven" (A drama-heavy approach focused on Kaitlyn's planning, but keeping details of the victim's impending doom active).
+
+Provide 2-3 genuine, detailed strategies beautifully tailored to this specific case. Highlight what information MUST be withheld to maintain the viewer's suspense, what starting point to use, and how to avoid early leaks.
+`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.1-pro-preview",
+        contents: { text: prompt },
+        config: {
+          systemInstruction: "You are a master scriptwriter and structural consultant. You excel at planning story pacing, dramatic irony, mystery, and suspense. Propose highly distinct, detailed storytelling structures in JSON format matching the schema.",
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              options: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    title: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    pros: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    cons: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    preservationRule: { type: Type.STRING, description: "Strict operational rules for what to withhold, what to focus on, and how to start." }
+                  },
+                  required: ["id", "title", "description", "pros", "cons", "preservationRule"]
+                }
+              },
+              reasoning: { type: Type.STRING }
+            },
+            required: ["options", "reasoning"]
+          },
+          safetySettings: STORY_SAFETY_SETTINGS
+        }
+      });
+
+      const text = response.text || "{}";
+      let parsed: any = {};
+      try {
+        parsed = JSON.parse(text);
+      } catch (e) {
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+      }
+
+      const opts = parsed.options || [];
+      setSuspenseOptions(opts);
+      if (opts.length > 0) {
+        setSelectedSuspenseOptionId(opts[0].id);
+      }
+      
+      setSuspenseDialogue([
+        {
+          role: "model",
+          parts: [{ text: `I have analyzed the forensic dossier and mapped out ${opts.length} distinct suspense strategies for your story. Let me know which one you prefer, or type your own ideas/suggestions in the chat below, and we can iterate together to design the ultimate suspense sequence!
+
+${parsed.reasoning || ""}` }]
+        }
+      ]);
+      
+      setCurrentNarratorStep("suspensed");
+      confetti({ particleCount: 100, spread: 50, colors: ["#3b82f6"] });
+    } catch (err: any) {
+      console.error(err);
+      setError("Failed to run suspense forensic analysis. Please try again.");
+    } finally {
+      setNarratorIsProcessing(false);
+    }
+  };
+
+  const handleSendSuspenseMessage = async () => {
+    if (!suspenseUserText.trim()) return;
+    setNarratorIsProcessing(true);
+    setError(null);
+
+    const userMsg = suspenseUserText.trim();
+    setSuspenseUserText("");
+
+    const updatedDialogue = [
+      ...suspenseDialogue,
+      {
+        role: "user" as const,
+        parts: [{ text: userMsg }]
+      }
+    ];
+    setSuspenseDialogue(updatedDialogue);
+
+    try {
+      const isScratch = outlineSource === "scratch";
+      const researchData = sections.map(s => `
+SECTION: ${s.title}
+RESEARCH DOSSIER:
+${s.researchBrief || "N/A"}
+      `).join("\n\n---\n\n");
+
+      const promptChat = `CASE: ${isScratch ? scratchTopic : (sections[0]?.title || "This Case")}
+ORIGINAL STORY OUTLINE OR DETAILS:
+${isScratch ? scratchResearchDossier : outlineText}
+
+RESEARCH DATA:
+${researchData}
+
+CURRENT COHORTS OF SUSPENSE STRATEGIES:
+${suspenseOptions.map(o => `- [${o.id}] ${o.title}: ${o.description}\n  Preservation Rule: ${o.preservationRule}`).join("\n\n")}
+
+SELECTED SUSPENSE STRATEGY:
+${selectedSuspenseOptionId ? (suspenseOptions.find(o => o.id === selectedSuspenseOptionId)?.title || "Custom Option") : "No selection yet"}
+
+USER FEEDBACK / OPINION:
+"${userMsg}"
+
+TASK:
+You are interacting with the user to finalize the suspense structure for this story.
+Analyze their feedback and suggestions.
+1. Answer their message in a professional, story-crafting advisor tone.
+2. Formulate updated suspense options/strategies or tweak the selected strategy based on their feedback.
+3. You can either refine the existing strategy list or propose adjusted strategies.
+4. You MUST return a JSON structure that contains:
+   - "reply": The direct message reply to the user (explaining why they are right, proposing adjustments, etc.).
+   - "updatedOptions": An updated array of 1 to 3 ProposedSuspenseOption options (you can preserve, tweak, or completely replace the options based on their opinions).
+   - "suggestedSelectedId": Which option ID should be active/selected by default now based on user interest. Or keep the current one.
+   - "customSuspenseBrief": A high-level custom compiled brief of the finalized agreed-upon suspense rules.
+
+Let's return a JSON matching this exact schema:
+{
+  "reply": "...",
+  "updatedOptions": [
+    {
+      "id": "...",
+      "title": "...",
+      "description": "...",
+      "pros": ["..."],
+      "cons": ["..."],
+      "preservationRule": "..."
+    }
+  ],
+  "suggestedSelectedId": "...",
+  "customSuspenseBrief": "..."
+}
+`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.1-pro-preview",
+        contents: { text: promptChat },
+        config: {
+          systemInstruction: "You are an expert story pacing and suspense architect. Your goal is to guide the user to the absolute best suspense preservation strategy for their historical case. Listen to their inputs, refine your proposals, and reply with updated strategies in JSON format.",
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              reply: { type: Type.STRING },
+              updatedOptions: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    id: { type: Type.STRING },
+                    title: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                    pros: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    cons: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    preservationRule: { type: Type.STRING }
+                  },
+                  required: ["id", "title", "description", "pros", "cons", "preservationRule"]
+                }
+              },
+              suggestedSelectedId: { type: Type.STRING },
+              customSuspenseBrief: { type: Type.STRING, description: "A summarized custom statement detailing what to withhold, how to begin at the point of disruption, and what specific cues or foreshadowing to ban." }
+            },
+            required: ["reply", "updatedOptions", "suggestedSelectedId", "customSuspenseBrief"]
+          },
+          safetySettings: STORY_SAFETY_SETTINGS
+        }
+      });
+
+      const text = response.text || "{}";
+      let parsed: any = {};
+      try {
+        parsed = JSON.parse(text);
+      } catch (e) {
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+      }
+
+      if (parsed.updatedOptions && parsed.updatedOptions.length > 0) {
+        setSuspenseOptions(parsed.updatedOptions);
+      }
+      if (parsed.suggestedSelectedId) {
+        setSelectedSuspenseOptionId(parsed.suggestedSelectedId);
+      }
+      if (parsed.customSuspenseBrief) {
+        setCustomSuspenseBrief(parsed.customSuspenseBrief);
+      }
+      
+      setSuspenseDialogue(prev => [
+        ...prev,
+        {
+          role: "user" as const,
+          parts: [{ text: userMsg }]
+        },
+        {
+          role: "model" as const,
+          parts: [{ text: parsed.reply || "" }]
+        }
+      ]);
+
+    } catch (err: any) {
+      console.error(err);
+      setError("Failed to process your suspense feedback. Please try again.");
+    } finally {
+      setNarratorIsProcessing(false);
+    }
+  };
+
   const handlePlanOutline = async (researchedSections: NarrativeSection[]) => {
     setNarratorIsProcessing(true);
     setError(null);
@@ -544,8 +907,20 @@ TASK: You MUST extract all relevant facts, names, events, and background info fr
       let prompt = "";
       let sysInst = OUTLINE_PLANNING_PROTOCOL;
 
+      const selectedOption = suspenseOptions.find(o => o.id === selectedSuspenseOptionId);
+      const suspenseStrategyContext = selectedOption ? `
+CRITICAL AGREED NARRATIVE SUSPENSE STRATEGY:
+- Title: ${selectedOption.title}
+- Strategy: ${selectedOption.description}
+- Preservation Rules: ${selectedOption.preservationRule}
+${customSuspenseBrief ? `- User Refined Directives: ${customSuspenseBrief}` : ""}
+
+You MUST align this structural and chronological plan strictly around this suspense strategy. You must structure the opening under Step 1 (Point of Disruption) to match this suspense choice (e.g. telling the initial events straight without revealing the culprit, poison, or early secret logs if identity is withheld), and lay out exactly what information is strategically withheld and how it is chronologically revealed in late sections, keeping early sections 100% free of leaks.` : "";
+
       if (isScratch) {
          prompt = `CASE TOPIC: ${scratchTopic}
+
+${suspenseStrategyContext}
 
 RESEARCH DATA:
 ${scratchResearchDossier}
@@ -579,6 +954,8 @@ RESEARCH DOSSIER:
 
         prompt = `ORIGINAL OUTLINE:
 ${outlineText}
+
+${suspenseStrategyContext}
 
 RESEARCH DATA:
 ${researchData}`;
@@ -626,8 +1003,20 @@ In the PLANNING OUTPUT FORMAT section '2. THE STARTING POINT (CRITICAL)', clearl
 
     try {
       let prompt = "";
+      const selectedOption = suspenseOptions.find(o => o.id === selectedSuspenseOptionId);
+      const suspenseSafetyConstraint = selectedOption ? `
+CRITICAL AGREED NARRATIVE SUSPENSE STRATEGY:
+- Title: ${selectedOption.title}
+- Strategy: ${selectedOption.description}
+- Preservation Rules: ${selectedOption.preservationRule}
+${customSuspenseBrief ? `- User Refined Directives: ${customSuspenseBrief}` : ""}
+
+You MUST aggressively audit the proposed planning document (or original outline) to ensure there are absolute ZERO suspense leaks, foreshadowing elements, or premature facts mentioned in earlier portions. For instance, if the plan mentions the ultimate culprit, key motive, or poison brand chemical fluid in the early sections before the chronological lab/police reveal, you MUST flag this as a CRITICAL SUSPENSE LEAK / FORESHADOWING VIOLATION and provide stern instructions to purge or delay it.` : "";
+
       if (isScratch) {
         prompt = `PHASE: FORENSIC INTEGRITY AUDIT & VERIFICATION
+
+${suspenseSafetyConstraint}
 GOAL: Audit our proposed structural planning document against the Outliner Retelling Protocols and Deep Case Research to guarantee 100% structural fidelity and prevent any potential violations.
 
 RESOURCES:
@@ -651,24 +1040,29 @@ Perform a rigorous verification and safety audit on the structural plan. Check f
 
 Provide a detailed, bulleted Forensic Audit and Correction directive specifying any adjustments needed to make sure the final generated outline is completely robust and 100% compliant.`;
       } else {
-        const researchData = researchedSections.map(s => `
+        const sectionsSideBySide = researchedSections.map(s => `
 SECTION: ${s.title}
+ORIGINAL BULLETS:
+${getNormalizedEvents(s).map((b, bIdx) => `${bIdx + 1}. ${b}`).join("\n")}
+
 RESEARCH DOSSIER:
-${s.researchBrief}
-      `).join("\n\n---\n\n");
+${s.researchBrief || "N/A"}
+        `).join("\n\n---\n\n");
 
         prompt = `
 PHASE: ERROR AND VIOLATION DETECTION
+
+${suspenseSafetyConstraint}
 GOAL: Forensic audit of the ORIGINAL outline against the NEW RESEARCH and OUTLINER PROTOCOLS.
 
 RESOURCES:
-1. RESEARCH DOSSIERS:
-${researchData}
+1. ORIGINAL OUTLINE SECTIONS & RESEARCH DOSSIERS (SIDE-BY-SIDE):
+${sectionsSideBySide}
 
 2. FORENSIC PLAN:
 ${outlinePlan}
 
-3. ORIGINAL OUTLINE:
+3. ORIGINAL OUTLINE (RAW TEXT):
 ${outlineText}
 
 4. PROTOCOLS:
@@ -677,7 +1071,7 @@ ${RETELLING_PROTOCOL}
 TASK:
 Identify every single error, omission, or violation in the original outline.
 You MUST analyze the story globally. Look for:
-1. CROSS-SECTIONAL REPETITIONS: Information or facts mentioned in Section 1 that are repeated in later sections (Major violation).
+1. CROSS-SECTIONAL REPETITIONS: Information or facts mentioned in Section 1 (whether in the original key event bullets or the research dossiers) that are repeated in later sections (Major violation - and check for duplicate motifs, such as transport crises/breaking wheels across sections).
 2. FACTUAL ERRORS: Information that contradicts the research.
 3. TIMELINE ERRORS: Events out of order or incorrect dates.
 4. PROTOCOL VIOLATIONS: Repetition (Say-it-once), Foreshadowing (Suspense preservation), Atmospheric descriptions (Story first), Testimony traps, etc.
@@ -719,6 +1113,17 @@ Provide a clear, bulleted forensic audit. For each violation, specify exactly wh
       let prompt = "";
       let sysInst = OUTLINE_REFINEMENT_PROTOCOL;
 
+      const selectedOption = suspenseOptions.find(o => o.id === selectedSuspenseOptionId);
+      const suspenseReconstructionRules = selectedOption ? `
+10. STRICT COMPLIANCE WITH OUR AGREED NARRATIVE SUSPENSE STRATEGY (CRITICAL):
+You MUST strictly execute the chosen suspense design:
+- Title: ${selectedOption.title}
+- Strategy: ${selectedOption.description}
+- Preservation Rules: ${selectedOption.preservationRule}
+${customSuspenseBrief ? `- Special Custom Directives: ${customSuspenseBrief}` : ''}
+
+This means you are strictly FORBIDDEN from revealing, telegraphing, or forecasting any withheld details (such as the perpetrator's real identity, specific malicious actions, or poisons) in any section prior to its planned chronological reveal. Present early events under the chosen framing or false-narrative illusion (e.g. telling the victim's illness as a mysterious/tragic occurrence with zero narrator winks or foreshadowing, keeping the viewer aligned with the characters' real-time chronological perspective).` : "";
+
       if (isScratch) {
         prompt = `RESEARCH DOSSIER:
 ${scratchResearchDossier}
@@ -743,7 +1148,8 @@ CRITICAL HARD CONSTRAINTS:
 7. EVERY date and number MUST be written in full words (e.g., 'the tenth of october nineteen ninety six', 'five hundred thousand dollars', etc.). No digits allowed!
 8. NO SHALLOW OR ONE-SENTENCE BULLETS: Every bullet/event in the JSON MUST be extremely rich, deep, and detailed. Do NOT write simple "academic facts" or single sentences. Each key event must be a multi-sentence paragraph (at least 3-5 sentences long, around 60 to 120 words) that connects seamlessly from the preceding events. It should convey a complete, gripping, immersive story picture that can be understood thoroughly on its own.
 9. ZERO COURT OR TRIAL TERM PRESENCE (100% FORBIDDEN IN ALL BULLETS): You are strictly forbidden from creating a dedicated or separate section, or writing any bullet points, containing words or details relating to courts, trials, jury selection, judges, lawyers, prosecutors, legal hearings, indictments, charges, or legal testimonies. Banish all trial drama and courtroom vocabulary (such as 'charged', 'placed in court', 'prosecutor', 'defense case') entirely. The final outcome of how the characters were dealt with (e.g. went to prison, died, what happened to them) must be written purely as direct chronological historical facts folded exclusively into the last 2 or 3 bullet points of the final section. The story concludes there.
-10. STRICTOR CORE COMPLIANCE WITH FORENSIC AUDIT: You must review the FORENSIC INTEGRITY AUDIT report closely and actively correct every single violation flagged. You are strictly forbidden from ignoring the audit's findings or repeating the flagged errors in the final outline. All identified violations must be fully resolved.
+11. STRICTOR CORE COMPLIANCE WITH FORENSIC AUDIT: You must review the FORENSIC INTEGRITY AUDIT report closely and actively correct every single violation flagged. You are strictly forbidden from ignoring the audit's findings or repeating the flagged errors in the final outline. All identified violations must be fully resolved.
+${suspenseReconstructionRules}
 
 Example of the exact depth, tone, and prose style needed for EVERY single bullet point:
 - "After the nineteen ninety one acquittal, Nash's criminal operation continues at a reduced but steady pace. His nightclub empire has contracted under years of legal pressure, but the drug network persists. A cooperative federal and local investigation begins around nineteen ninety six, pooling intelligence from multiple agencies and focusing on Nash's drug trafficking and money laundering operations as the entry point."
@@ -795,6 +1201,8 @@ ${s.researchBrief}
         prompt = `
 GOAL: High-fidelity narrative reconstruction. Take the ORIGINAL outline and the FORENSIC AUDIT and merge them into the final structured outline.
 
+${suspenseReconstructionRules}
+
 CRITICAL FIDELITY MANDATE:
 1. NO SUMMARIZATION: You are forbidden from summarizing the original outline. If Section 1 of the original outline has 30 detailed bullet points, the refined version MUST have at least 30 detailed bullet points.
 2. MAINTAIN ALL DEPTH: If a bullet in the original outline consists of 4-5 sentences, you MUST carry over all those sentences. Do NOT shorten them.
@@ -826,7 +1234,7 @@ Ensure that the final output maintains 100% section-by-section structural alignm
 You MUST start the refined story outline EXACTLY where the original outline started. Do NOT shift the opening of the story to a later crime hook or skip early sections/setup.
 From that original started point, organize and chronologicalize all subsequent sections/chapters.
 Do NOT tell any part of the story through police/investigator/witness/court perspective framing. Ensure the facts are narrated directly as they happened in real-time. Preserve all detail, depth, and density from the original outline without summary.`
-            : OUTLINE_REFINEMENT_PROTOCOL) + "\n\nCRITICAL DATE RULE: You MUST write out all dates in full words. No digits for days or years. (e.g., 'the second of march, twenty twenty three').\n\nCRITICAL QUALITY RULE: DO NOT SUMMARIZE OR SHORTEN ANY KEY EVENTS. Every bullet/event in the output JSON MUST be extremely rich and detailed (at least 3-5 sentences, 60-120 words per bullet point) as per the OUTLINE_REFINEMENT_PROTOCOL. Single-sentence bullet points are strictly forbidden and make the output useless.";
+            : OUTLINE_REFINEMENT_PROTOCOL) + "\n\nCRITICAL DATE RULE: You MUST write out all dates in full words. No digits for days or years. (e.g., 'the second of march, twenty twenty three').\n\nCRITICAL QUALITY RULE: DO NOT SUMMARIZE OR SHORTEN ANY KEY EVENTS. Every bullet/event in the output JSON MUST be extremely rich and detailed (at least 3-5 sentences, 60-120 words per bullet point) as per the OUTLINE_REFINEMENT_PROTOCOL. Single-sentence bullet points are strictly forbidden and make the output useless.\n\nCRITICAL FORWARD-ONLY RULE: Length must come from chronological depth, never from restatement or atmospheric padding. Every sentence within a bullet must advance the action to a new moment or introduce a new fact. No explanatory sentences, atmospheric wrap-ups, or logical conclusion repetitions.";
       }
 
       const response = await ai.models.generateContent({
@@ -938,18 +1346,70 @@ PROTOCOLS & VETTING INSTRUCTIONS:
 ${OUTLINE_VETTING_PROTOCOL}
 
 TASK:
-Perform a relentless, bullet-by-bullet audit. Highlight all violations and list the exact text and explain why it's a violation. Offer corrected versions of the exact sentences. Be extremely direct and honest.`;
+Perform a relentless, bullet-by-bullet audit. Identify all violations of the protocols in any bullet. Only include items in the violations list that ACTUALLY contain violations. If a bullet is completely clean, do not include it. Make sure all corrected bullets keep the rich detail and length (60-120 words per bullet).`;
 
       const response = await ai.models.generateContent({
         model: "gemini-3.1-pro-preview",
         contents: { text: prompt },
         config: {
-          systemInstruction: OUTLINE_VETTING_PROTOCOL,
+          systemInstruction: "You are an uncompromising Lead Narrative Forensic Auditor. Your mission is to perform a brutal, surgical, bullet-by-bullet audit of a reconstructed narrative outline. For each violation of Outliner Retelling Protocols, you must generate a JSON entry containing the section number, bullet index, category, explanation, violating phrase, verbatim original text, and a surgically corrected version of the bullet point that resolves the violation while retaining 100% of all other details, names, events, and length (60-120 words per bullet). If a bullet point has no violations, do not include it. Your response must strictly match the responseSchema.",
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              violations: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    sectionNumber: { type: Type.INTEGER, description: "1-based section number" },
+                    bulletIndex: { type: Type.INTEGER, description: "0-based bullet index within the section" },
+                    violationType: { type: Type.STRING, description: "The type of protocol violation e.g. FORESHADOWING | COURTROOM_TERMS | DIGITS_NUMERALS | MICRO_ACTIONS | RESTATEMENTS | OTHER" },
+                    violatingPhrase: { type: Type.STRING, description: "The specific text that violates the protocol" },
+                    explanation: { type: Type.STRING, description: "Detailed reason why this violates the protocols" },
+                    originalBulletText: { type: Type.STRING, description: "The exact verbatim original text of the entire bullet point" },
+                    correctedBulletText: { type: Type.STRING, description: "The corrected multi-sentence bullet point paragraph. Keep 60-120 words, keep details/names, just purge the violation." }
+                  },
+                  required: ["sectionNumber", "bulletIndex", "violationType", "violatingPhrase", "explanation", "originalBulletText", "correctedBulletText"]
+                },
+                description: "List of identified narrative violations across sections"
+              },
+              originalReportMarkdown: { type: Type.STRING, description: "Summarized detailed markdown analysis of the audit" }
+            },
+            required: ["violations", "originalReportMarkdown"]
+          },
           safetySettings: STORY_SAFETY_SETTINGS
         }
       });
 
-      setReconstructedOutlineViolationsReport(response.text || "No reconstructed outline violations detected.");
+      const text = response.text || "{}";
+      let parsed: any = {};
+      try {
+        parsed = JSON.parse(text);
+      } catch (e) {
+        const jsonMatch = text.match(/\{[\s\S]*\}/) || text.match(/\[[\s\S]*\]/);
+        if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+      }
+
+      const violationsList: OutlineViolation[] = [];
+      if (parsed && Array.isArray(parsed.violations)) {
+        parsed.violations.forEach((v: any, idx: number) => {
+          violationsList.push({
+            id: `v_${v.sectionNumber}_${v.bulletIndex}_${idx}_${Math.random().toString(36).substr(2, 5)}`,
+            sectionNumber: Number(v.sectionNumber),
+            bulletIndex: Number(v.bulletIndex),
+            violationType: v.violationType || "VIOLATION",
+            violatingPhrase: v.violatingPhrase || "",
+            explanation: v.explanation || "",
+            originalBulletText: v.originalBulletText || v.originalBullet || "",
+            correctedBulletText: v.correctedBulletText || v.correctedBullet || ""
+          });
+        });
+      }
+
+      setOutlineViolations(violationsList);
+      setCheckedViolationIds(violationsList.map(v => v.id));
+      setReconstructedOutlineViolationsReport(parsed.originalReportMarkdown || "Audit completed. No major structural violations found requiring forced correction, but you can review individual items.");
       setCurrentNarratorStep("doublechecked");
       confetti({ particleCount: 150, spread: 70, colors: ["#ef4444", "#dc2626"] });
     } catch (err) {
@@ -965,98 +1425,31 @@ Perform a relentless, bullet-by-bullet audit. Highlight all violations and list 
     setError(null);
 
     try {
-      const outlineRepresentation = currentSections.map(s => `
-SECTION ${s.sectionNumber || s.id}: ${s.title}
-TIME PERIOD: ${s.timePeriod || 'N/A'}
-PRIMARY FOCUS: ${s.primaryFocus || 'N/A'}
-KEY EVENT BULLETS:
-${getNormalizedEvents(s).map((b, bIdx) => `  ${bIdx + 1}. ${b}`).join("\n")}
-`).join("\n\n---\n\n");
-
-      const prompt = `GOAL: Sincere precision alignment. Purge all detected violations from the reconstructed outline while retaining full depth and narrative story elements.
-
-RECONSTRUCTED OUTLINE:
-${outlineRepresentation}
-
-DETAILED VETTING REPORT & ACTION PLAN:
-${reconstructedOutlineViolationsReport}
-
-TASK:
-You must correct and rewrite the outline sections based on the vetting report and standard Outliner Retelling Protocols.
-For each section, look at the identified violations, rewrite those specific sentences/bullets to remove foreshadowing, psychological telegraphing, investigative framing, digits, and courtroom terms.
-DO NOT shorten, summarize, or compress other bullet points. Keep their extreme detail and rich descriptions intact (60-120 words per bullet point, multiple sentences).
-DO NOT delete non-violating bullet points. Maintain the exact sequence and narrative depth. Only clean up target violations.
-
-Return a JSON block exactly matching this schema:
-{
-  "suspenseTypeDeclaration": {
-    "primaryType": "IDENTITY-UNKNOWN | MOTIVE-UNKNOWN | MECHANISM | FALSE-NARRATIVE",
-    "secondaryType": "optional",
-    "withheldInformation": "description",
-    "revealWindow": "section ids",
-    "strictExclusions": "what must not appear"
-  },
-  "sections": [
-    {
-      "id": "slug",
-      "sectionNumber": 1,
-      "title": "Title",
-      "timePeriod": "Date/Range",
-      "wordCountTarget": 500,
-      "primaryFocus": "Single sentence function",
-      "startEvent": "Exact moment it begins",
-      "endEvent": "Exact moment it ends",
-      "narrativeBeat": "e.g. The Setup",
-      "bullets": ["Detail-rich, multi-sentence narrative action with all violations carefully corrected and purged, retaining all depth and facts"],
-      "whatNotToInclude": ["Strict exclusions to protect suspense"]
-    }
-  ]
-}
-`;
-
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
-        contents: { text: prompt },
-        config: {
-          systemInstruction: OUTLINE_VETTING_CORRECTION_PROTOCOL,
-          responseMimeType: "application/json",
-          safetySettings: STORY_SAFETY_SETTINGS
-        }
-      });
-
-      const text = response.text || "{}";
-      let parsed: any = {};
-      try {
-        parsed = JSON.parse(text);
-      } catch (e) {
-        const jsonMatch = text.match(/\{[\s\S]*\}/) || text.match(/\[[\s\S]*\]/);
-        if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
-      }
-
-      if (parsed.suspenseTypeDeclaration) {
-        setSuspenseDeclaration(parsed.suspenseTypeDeclaration);
-      }
-
-      let corrected: NarrativeSection[] = [];
-      if (parsed.sections && Array.isArray(parsed.sections)) {
-        corrected = parsed.sections;
-      } else if (Array.isArray(parsed)) {
-        corrected = parsed;
-      }
-
-      // Preserve research brief and update sections
-      corrected = corrected.map((sec, idx) => {
-        const matchingOrigSec: any = currentSections[idx] || currentSections.find(s => s.sectionNumber === sec.sectionNumber) || {};
+      const corrected = currentSections.map((sec, secIdx) => {
+        const originalBullets = getNormalizedEvents(sec);
+        const updatedBullets = originalBullets.map((bullet, bIdx) => {
+          // Find any checked violations for this section and bullet index.
+          const secNum = sec.sectionNumber || (secIdx + 1);
+          const blockViolation = outlineViolations.find(v => 
+            v.sectionNumber === secNum && 
+            v.bulletIndex === bIdx &&
+            checkedViolationIds.includes(v.id)
+          );
+          if (blockViolation && blockViolation.correctedBulletText) {
+            return blockViolation.correctedBulletText;
+          }
+          return bullet;
+        });
+        
         return {
           ...sec,
-          id: sec.id || matchingOrigSec.id || `corrected_${idx}_${Math.random().toString(36).substr(2, 9)}`,
-          estimatedWordCount: sec.estimatedWordCount || sec.wordCountTarget || matchingOrigSec.estimatedWordCount || 5000,
-          bullets: sec.bullets || (sec as any).keyEvents || [],
-          exclusions: sec.exclusions || (sec as any).whatNotToInclude || [],
-          researchBrief: matchingOrigSec.researchBrief || scratchResearchDossier || ""
+          bullets: updatedBullets,
+          keyEvents: updatedBullets
         };
       });
 
+      setUncorrectedSections(currentSections);
+      setSelectedOutlineType("corrected");
       setSections(corrected);
       setCurrentNarratorStep("corrected");
       confetti({ particleCount: 200, spread: 80, colors: ["#10b981"] });
@@ -1068,9 +1461,163 @@ Return a JSON block exactly matching this schema:
     }
   };
 
+  const handleApplyCustomCorrection = async () => {
+    if (!customCorrectionUserText.trim()) return;
+    setNarratorIsProcessing(true);
+    setError(null);
+
+    const userMessage = customCorrectionUserText.trim();
+    const newUserMsgRecord: Content = { role: "user", parts: [{ text: userMessage }] };
+    const updatedHistory = [...customCorrectionDialogue, newUserMsgRecord];
+    setCustomCorrectionDialogue(updatedHistory);
+    setCustomCorrectionUserText("");
+
+    try {
+      const activeOutlineText = sections.map((sec, idx) => `
+SECTION ${sec.sectionNumber || idx + 1}: ${sec.title}
+TIME PERIOD: ${sec.timePeriod || "N/A"}
+PRIMARY FOCUS: ${sec.primaryFocus || "N/A"}
+KEY EVENTS:
+${(sec.bullets || sec.keyEvents || []).map((b, bIdx) => `${bIdx + 1}. ${b}`).join("\n")}
+      `).join("\n\n---\n\n");
+
+      const prompt = `
+YOU ARE AN ELITE STORY EDITOR AND LEAD NARRATIVE FORENSIC AUDITOR.
+The user has provided interactive feedback and custom correction guidelines regarding the current technical story outline.
+Your goal is to parse their instructions with 100% precision and modify the active outline sections accordingly.
+
+CURRENT SECTIONS/OUTLINE UNDER SCRUTINY:
+${activeOutlineText}
+
+USER'S INSTRUCTION / DETECTED VIOLATION:
+"${userMessage}"
+
+If they provide a reference to "reconstruction is not forced/sometimes not needed depending on agreed suspense," keep that context in mind. They may ask you to:
+- Delete, add, or rewrite specific sections or events.
+- Refine historical details or correct facts.
+- Adjust story pacing, reveal points, or suspense parameters.
+- Or describe some custom aspects they want emphasized.
+
+OPERATIONAL EDITING CONSTRAINTS (CRITICAL):
+1. DEEP REFINEMENT INTENSITY: Each key event (bullet point) in updated sections must remain highly detailed, immersive, and multi-sentence paragraphs (each containing 60-120 words or 3-5 sentences), unless the user explicitly requested a change to the style/detail of specific parts.
+2. PRESERVE UNTOUCHED SECTIONS: If the user's instructions only target a specific section or event, do not truncate or shorten the other untouched sections. Leave them fully detailed and preserve their original event list exactly.
+3. ABSOLUTE DATE RULE: All dates/numbers must remain written in full words (e.g., 'the fifteenth of november, two thousand four', 'six o'clock', 'thirty one thousand dollars') without digits, unless requested otherwise.
+4. ZERO TRIAL/COURT TERM PRESENCE: Unless the user's explicit historical facts demand describing a physical custody change or a plain physical outcome, keep all legal/judicial terms and courtroom framing strictly banned.
+5. REAL-TIME OMNISCIENT ACTION: Every single event must keep its action-driven, real-time momentum. 
+
+You must return the corrected outline AND a detailed narrative response explaining what you changed and why, in accordance with the user's feedback.
+
+YOUR OUTPUT MUST EXACTLY MATCH THIS JSON SCHEMA:
+{
+  "reply": "A professional, direct explanation of the changes made, tailored to the user's specific feedback, written in a clear, narrative-forensic voice.",
+  "sections": [
+    {
+      "sectionNumber": 1,
+      "title": "Section Title",
+      "timePeriod": "e.g. November two thousand four",
+      "wordCountTarget": 5000,
+      "primaryFocus": "The focus of this section",
+      "keyEvents": [
+        "Highly detailed event 1...",
+        "Highly detailed event 2..."
+      ],
+      "whatNotToInclude": [
+        "What to exclude"
+      ]
+    }
+  ]
+}
+`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.1-pro-preview",
+        contents: { text: prompt },
+        config: {
+          systemInstruction: "You are an expert Lead Story Architect and Forensic Narrative Refiner. Your goal is to process the user's custom correction instructions and surgically adapt the story sections in real-time. Follow the JSON schema strictly.",
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              reply: { type: Type.STRING, description: "A detailed description of what edits were performed on the key events" },
+              sections: {
+                type: Type.ARRAY,
+                description: "The complete revised list of sections including all updated keyEvents/bullets.",
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    sectionNumber: { type: Type.INTEGER },
+                    title: { type: Type.STRING },
+                    timePeriod: { type: Type.STRING },
+                    wordCountTarget: { type: Type.INTEGER },
+                    primaryFocus: { type: Type.STRING },
+                    keyEvents: { type: Type.ARRAY, items: { type: Type.STRING } },
+                    whatNotToInclude: { type: Type.ARRAY, items: { type: Type.STRING } }
+                  },
+                  required: ["sectionNumber", "title", "timePeriod", "wordCountTarget", "primaryFocus", "keyEvents", "whatNotToInclude"]
+                }
+              }
+            },
+            required: ["reply", "sections"]
+          },
+          safetySettings: STORY_SAFETY_SETTINGS
+        }
+      });
+
+      const text = response.text || "{}";
+      let parsed: any = {};
+      try {
+        parsed = JSON.parse(text);
+      } catch (e) {
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+      }
+
+      const updatedSections: NarrativeSection[] = (parsed.sections || []).map((sec: any, sIdx: number) => {
+        const eventsList = sec.keyEvents || sec.bullets || [];
+        const originalSection = sections.find(orig => orig.sectionNumber === sec.sectionNumber) || sections[sIdx];
+        return {
+          id: originalSection?.id || `sec-${sec.sectionNumber || Math.random()}`,
+          sectionNumber: sec.sectionNumber,
+          title: sec.title,
+          timePeriod: sec.timePeriod,
+          wordCountTarget: sec.wordCountTarget || originalSection?.wordCountTarget || 1500,
+          primaryFocus: sec.primaryFocus,
+          keyEvents: eventsList,
+          bullets: eventsList,
+          whatNotToInclude: sec.whatNotToInclude || [],
+          // Preserve research & narration fields
+          researchBrief: originalSection?.researchBrief || "",
+          narrative: originalSection?.narrative || "",
+          narrativeVersions: originalSection?.narrativeVersions || [],
+          selectedNarrativeIndex: originalSection?.selectedNarrativeIndex ?? 0,
+          actualWordCount: originalSection?.actualWordCount,
+          startEvent: sec.startEvent || originalSection?.startEvent,
+          endEvent: sec.endEvent || originalSection?.endEvent,
+          exclusions: sec.exclusions || originalSection?.exclusions
+        };
+      });
+
+      if (updatedSections.length > 0) {
+        setSections(updatedSections);
+        setSelectedOutlineType("corrected");
+      }
+
+      const modelReply = parsed.reply || "Done! I have carefully implemented your custom corrections to the outline. You can view the fully updated list of sections below.";
+      setCustomCorrectionDialogue(prev => [...prev, { role: "model", parts: [{ text: modelReply }] }]);
+      confetti({ particleCount: 150, spread: 75, colors: ["#3b82f6", "#10b981"] });
+
+    } catch (err) {
+      console.error(err);
+      setError("Failed to apply custom corrections. Please check your prompt and try again.");
+      setCustomCorrectionDialogue(prev => prev.slice(0, -1));
+    } finally {
+      setNarratorIsProcessing(false);
+    }
+  };
+
   const handleNarrateSection = async (index: number) => {
-    const section = sections[index];
-    if (!section || !section.researchBrief) return;
+    const section = activeSectionsRef.current[index];
+    if (!section) return;
 
     setNarratingIndex(index);
     setError(null);
@@ -1097,11 +1644,12 @@ Return a JSON block exactly matching this schema:
         ${exclusions.length > 0 ? exclusions.map((ex, i) => `- ${ex}`).join("\n") : "None."}
         
         DEDICATED HISTORICAL RESEARCH DOSSIER / HISTORICAL TRUTHS FOR DETAILS:
-        ${section.researchBrief}
+        ${section.researchBrief || "No additional research dossier provided. Expand directly on the provided Chronological Key Events using high dramatization, focus, and narrative logic."}
         
         TARGET DENSITY & WORD COUNT:
         - You MUST produce a fully-fleshed, deeply engaging narrative text of AT LEAST ${targetWordCount} words (e.g., target ${targetWordCount} - ${targetWordCount + 500} words).
         - Expand every chronological event into multiple immersive, multi-sentence paragraphs with active human descriptions, dialogue, scenes, and thoughts.
+        - SENTENCE-LEVEL FORWARD MOTION: Every sentence must introduce a new event, reveal, or consequence. No sentence may exist to explain why a previous sentence happened, describe the atmosphere after an action, or restate what the previous sentence already established. Length comes from more events, not from commentary on existing ones.
         - NEVER summarize. Do not skip or speed through any events. Ensure the narrative flows continuously.
         
         CRITICAL RECONSTRUCTION PROTOCOLS (VIOLATION PREVENTIONS):
@@ -1115,7 +1663,7 @@ Return a JSON block exactly matching this schema:
         model: "gemini-3.1-pro-preview", 
         contents: { text: prompt },
         config: {
-          systemInstruction: NARRATION_PROTOCOL + "\n\nCRITICAL DATE RULE: You MUST write out all dates in full words. No digits for days or years. (e.g., 'the second of March, twenty twenty three').\n\nFLESH OUT MANDATE: Do NOT just repeat the outline. Use the research to build real, engaging scenes. If you just mirror the outline bullet points, you have failed.",
+          systemInstruction: NARRATION_PROTOCOL + "\n\nCRITICAL DATE RULE: You MUST write out all dates in full words. No digits for days or years. (e.g., 'the second of March, twenty twenty three').\n\nFLESH OUT MANDATE: Do NOT just repeat the outline. Use the research to build real, engaging scenes. If you just mirror the outline bullet points, you have failed.\n\nCRITICAL WORD SIMPLICITY MANDATE: You are strictly forbidden from using academic, formal, literary, or dramatic words. Make all sentences extremely simple and direct. Use basic everyday English that a twelve-year-old can easily understand. Break down all complex concepts (e.g., write 'ran out of money' instead of 'financial embarrassment').",
           temperature: 0.9, 
           topP: 0.95,
           safetySettings: STORY_SAFETY_SETTINGS
@@ -1125,7 +1673,7 @@ Return a JSON block exactly matching this schema:
       const result = response.text || "";
       const actualCount = wordCount(result);
 
-      setSections(prev => {
+      updateActiveSections(prev => {
         const next = [...prev];
         const narrative = result;
         const versions = [narrative];
@@ -1140,12 +1688,12 @@ Return a JSON block exactly matching this schema:
       });
 
       setNarratorChatHistory([
-        ...narratorChatHistory,
+        ...chatHistoryRef.current,
         { role: "user", parts: [{ text: `Narrate section: ${section.title}` }] },
         { role: "model", parts: [{ text: result }] },
       ]);
 
-      if (index === sections.length - 1) {
+      if (index === activeSectionsRef.current.length - 1) {
         setCurrentNarratorStep("narrating");
       }
 
@@ -1159,13 +1707,41 @@ Return a JSON block exactly matching this schema:
     } catch (err) {
       console.error(err);
       setError("Failed to narrate this section. Please try again.");
+      throw err; // throw so handleNarrateAll can catch and halt if requested
     } finally {
       setNarratingIndex(null);
     }
   };
 
-  const totalEstimatedWords = sections.reduce((acc, s) => acc + (s.estimatedWordCount || 0), 0);
-  const totalActualWords = sections.reduce((acc, s) => acc + (s.actualWordCount || 0), 0);
+  const handleNarrateAll = async () => {
+    if (isNarratingAll || narratingIndex !== null) return;
+    setIsNarratingAll(true);
+    setError(null);
+
+    const totalToNarrate = activeSectionsRef.current.length;
+    try {
+      for (let i = 0; i < totalToNarrate; i++) {
+        // Run sequentially
+        await handleNarrateSection(i);
+        // Wait briefly between calls to allow UI state cycles to fully propagate
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      confetti({
+        particleCount: 150,
+        spread: 80,
+        origin: { y: 0.5 },
+        colors: ['#10b981', '#3b82f6', '#d97706']
+      });
+    } catch (err) {
+      console.error(err);
+      setError("An error occurred during continuous narration. The process has been halted.");
+    } finally {
+      setIsNarratingAll(false);
+    }
+  };
+
+  const totalEstimatedWords = activeSections.reduce((acc, s) => acc + (s.estimatedWordCount || 0), 0);
+  const totalActualWords = activeSections.reduce((acc, s) => acc + (s.actualWordCount || 0), 0);
 
   const getOutlineSectionWordCount = (section: NarrativeSection): number => {
     let count = 0;
@@ -1201,10 +1777,10 @@ Return a JSON block exactly matching this schema:
     return count;
   };
 
-  const totalOutlineWords = sections.reduce((acc, s) => acc + getOutlineSectionWordCount(s), 0);
+  const totalOutlineWords = activeSections.reduce((acc, s) => acc + getOutlineSectionWordCount(s), 0);
 
    const updateSection = (id: string, updates: Partial<NarrativeSection>) => {
-    setSections(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
+    updateActiveSections(prev => prev.map(s => s.id === id ? { ...s, ...updates } : s));
   };
 
   const handleRewriteNarrativeClick = (index: number) => {
@@ -1216,7 +1792,7 @@ Return a JSON block exactly matching this schema:
   const executeRewriteNarrative = async () => {
     if (sectionToRewriteIdx === null) return;
     const index = sectionToRewriteIdx;
-    const section = sections[index];
+    const section = activeSections[index];
     if (!section) return;
 
     setIsRewriteModalOpen(false);
@@ -1240,6 +1816,7 @@ Return a JSON block exactly matching this schema:
         ${rewriteFeedback || "Make it better following all protocols."}
         
         TASK: Rewrite this section. Maintain the depth and density of the original outline. Ensure dates are in words.
+        SENTENCE-LEVEL FORWARD MOTION: Every sentence must introduce a new event, reveal, or consequence. No sentence may exist to explain why a previous sentence happened, describe the atmosphere after an action, or restate what the previous sentence already established. Length comes from more events, not from commentary on existing ones.
         
         TOTAL DISRUPTION MANDATE: You MUST destroy the original sentence and structure. If you just swap words, you have failed. Maintain the exact sequence of events as they appear in the original text but use simple spoken words.
 
@@ -1254,7 +1831,7 @@ Return a JSON block exactly matching this schema:
         model: "gemini-3.1-pro-preview",
         contents: { text: prompt },
         config: {
-          systemInstruction: NARRATION_PROTOCOL + "\n\nCRITICAL DATE RULE: You MUST write out all dates in full words. No digits for days or years. (e.g., 'the second of March, twenty twenty three').\n\nFLESH OUT MANDATE: Do NOT just repeat the outline. Use the research to build real, engaging scenes. Also, apply zero-court, zero-cell-ping, and story-heart focus rules strictly.",
+          systemInstruction: NARRATION_PROTOCOL + "\n\nCRITICAL DATE RULE: You MUST write out all dates in full words. No digits for days or years. (e.g., 'the second of March, twenty twenty three').\n\nFLESH OUT MANDATE: Do NOT just repeat the outline. Use the research to build real, engaging scenes. Also, apply zero-court, zero-cell-ping, and story-heart focus rules strictly.\n\nCRITICAL WORD SIMPLICITY MANDATE: You are strictly forbidden from using academic, formal, literary, or dramatic words. Make all sentences extremely simple and direct. Use basic everyday English that a twelve-year-old can easily understand. Break down all complex concepts (e.g., write 'ran out of money' instead of 'financial embarrassment').",
           temperature: 0.8,
           safetySettings: STORY_SAFETY_SETTINGS
         }
@@ -1263,7 +1840,7 @@ Return a JSON block exactly matching this schema:
       const result = response.text || "";
       const actualCount = wordCount(result);
 
-      setSections(prev => {
+      updateActiveSections(prev => {
         const next = [...prev];
         const s = next[index];
         const versions = [...(s.narrativeVersions || []), result];
@@ -1292,7 +1869,7 @@ Return a JSON block exactly matching this schema:
   };
 
   const handleSelectNarrativeVersion = (sectionId: string, versionIdx: number) => {
-    setSections(prev => prev.map(s => {
+    updateActiveSections(prev => prev.map(s => {
       if (s.id === sectionId && s.narrativeVersions) {
         const selectedText = s.narrativeVersions[versionIdx];
         return {
@@ -1315,9 +1892,7 @@ Return a JSON block exactly matching this schema:
   }, [currentNarratorStep, steps, maxReachedStep]);
 
   const goToStep = (step: any) => {
-    if (steps.indexOf(step) <= steps.indexOf(maxReachedStep)) {
-      setCurrentNarratorStep(step);
-    }
+    setCurrentNarratorStep(step);
   };
 
   const goBack = () => {
@@ -1331,7 +1906,7 @@ Return a JSON block exactly matching this schema:
 
   const goForward = () => {
     const currentIndex = steps.indexOf(currentNarratorStep);
-    if (currentIndex < steps.length - 1 && steps.indexOf(steps[currentIndex + 1]) <= steps.indexOf(maxReachedStep)) {
+    if (currentIndex < steps.length - 1) {
       setCurrentNarratorStep(steps[currentIndex + 1] as any);
     }
   };
@@ -1384,7 +1959,7 @@ Return a JSON block exactly matching this schema:
           alignment: AlignmentType.CENTER,
           children: [
             new TextRun({
-              text: "FULL NARRATION: " + (sections[0]?.title || "STORY"),
+              text: "FULL NARRATION: " + (activeSections[0]?.title || "STORY"),
               bold: true,
               size: 32,
               font: "Georgia",
@@ -1392,7 +1967,7 @@ Return a JSON block exactly matching this schema:
           ],
         }),
         new Paragraph({ text: "" }),
-        ...sections.filter(s => s.narrative).flatMap((section, index) => [
+        ...activeSections.filter(s => s.narrative).flatMap((section, index) => [
           new Paragraph({
             alignment: AlignmentType.CENTER,
             children: [
@@ -1424,7 +1999,7 @@ Return a JSON block exactly matching this schema:
           alignment: AlignmentType.CENTER,
           children: [
             new TextRun({
-              text: "TECHNICAL STORY OUTLINE: " + (sections[0]?.title || "NARRATIVE"),
+              text: "TECHNICAL STORY OUTLINE: " + (activeSections[0]?.title || "NARRATIVE"),
               bold: true,
               size: 32,
               font: "Georgia",
@@ -1475,7 +2050,7 @@ Return a JSON block exactly matching this schema:
         ] : []),
 
         // Sections
-        ...sections.flatMap((section, index) => [
+        ...activeSections.flatMap((section, index) => [
           new Paragraph({
             shading: { fill: "f8fafc" },
             border: {
@@ -1498,7 +2073,7 @@ Return a JSON block exactly matching this schema:
               new TextRun({ text: section.timePeriod || "---" }),
               new TextRun({ text: "    |    ", color: "94a3b8" }),
               new TextRun({ text: "Word Count Target: ", bold: true }),
-              new TextRun({ text: String(section.wordCountTarget || section.estimatedWordCount || 500) + " words" }),
+              new TextRun({ text: String(section.wordCountTarget || section.estimatedWordCount || 1500) + " words" }),
             ],
           }),
           new Paragraph({
@@ -1637,8 +2212,8 @@ ${storyContextText.substring(0, 12000)}`
       } else {
         if (scratchTopic) {
           contentName = scratchTopic;
-        } else if (sections.length > 0 && sections[0].title) {
-          contentName = sections[0].title;
+        } else if (activeSections.length > 0 && activeSections[0].title) {
+          contentName = activeSections[0].title;
         }
       }
     }
@@ -1659,6 +2234,154 @@ ${storyContextText.substring(0, 12000)}`
     }
 
     saveAs(blob, `${cleaned}.docx`);
+  };
+
+  const downloadFullOutline = async (type: "uncorrected" | "corrected") => {
+    const list = type === "uncorrected" ? uncorrectedSections : sections;
+    if (!list || list.length === 0) return;
+
+    let docChildren: any[] = [
+      new Paragraph({
+        alignment: AlignmentType.CENTER,
+        children: [
+          new TextRun({
+            text: `TECHNICAL STORY OUTLINE (${type === "uncorrected" ? "OLD / UNCORRECTED" : "NEW / CORRECTED"}): ` + (list[0]?.title || "NARRATIVE"),
+            bold: true,
+            size: 32,
+            font: "Georgia",
+          }),
+        ],
+      }),
+      new Paragraph({ text: "" }),
+      
+      // Suspense Declaration
+      ...(suspenseDeclaration ? [
+        new Paragraph({
+          shading: { fill: "f3e8ff" },
+          children: [
+            new TextRun({
+              text: " SUSPENSE STRATEGY ",
+              bold: true,
+              size: 24,
+              color: "581c87",
+            }),
+          ],
+        }),
+        new Paragraph({ text: "" }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Primary Type: ", bold: true }),
+            new TextRun({ text: suspenseDeclaration.primaryType }),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Withheld Information: ", bold: true }),
+            new TextRun({ text: suspenseDeclaration.withheldInformation }),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Reveal Window: ", bold: true }),
+            new TextRun({ text: suspenseDeclaration.revealWindow }),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Strict Exclusions: ", bold: true }),
+            new TextRun({ text: suspenseDeclaration.strictExclusions, italics: true, color: "6b21a8" }),
+          ],
+        }),
+        new Paragraph({ text: "" }),
+      ] : []),
+
+      // Sections
+      ...list.flatMap((section, index) => [
+        new Paragraph({
+          shading: { fill: "f8fafc" },
+          border: {
+            top: { color: "e2e8f0", size: 1, style: BorderStyle.SINGLE },
+            bottom: { color: "e2e8f0", size: 1, style: BorderStyle.SINGLE },
+          },
+          children: [
+            new TextRun({ 
+              text: ` SECTION ${section.sectionNumber || index + 1}: ${section.title.toUpperCase()} `, 
+              bold: true, 
+              size: 24,
+              color: "1e293b" 
+            }),
+          ],
+        }),
+        new Paragraph({ text: "" }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Time Period: ", bold: true }),
+            new TextRun({ text: section.timePeriod || "---" }),
+            new TextRun({ text: "    |    ", color: "94a3b8" }),
+            new TextRun({ text: "Word Count Target: ", bold: true }),
+            new TextRun({ text: String(section.wordCountTarget || section.estimatedWordCount || 1500) + " words" }),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Narrative Beat: ", bold: true }),
+            new TextRun({ text: section.narrativeBeat || "---" }),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Primary Focus: ", bold: true }),
+            new TextRun({ text: section.primaryFocus || "---", italics: true }),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: "Start Event: ", bold: true, color: "166534" }),
+            new TextRun({ text: section.startEvent || "---" }),
+          ],
+        }),
+        new Paragraph({
+          children: [
+            new TextRun({ text: "End Event: ", bold: true, color: "991b1b" }),
+            new TextRun({ text: section.endEvent || "---" }),
+          ],
+        }),
+        new Paragraph({ text: "" }),
+        new Paragraph({
+          children: [new TextRun({ text: "CORE NARRATIVE BEATS", bold: true, size: 20, underline: {} })],
+        }),
+        ...(section.keyEvents || section.bullets || []).map((bullet, bIdx) => 
+          new Paragraph({
+            text: `${bIdx + 1}. ${bullet}`,
+            indent: { left: 720 },
+          })
+        ),
+        new Paragraph({ text: "" }),
+        new Paragraph({
+          children: [new TextRun({ text: "SUSPENSE EXCLUSIONS", bold: true, size: 20, color: "991b1b" })],
+        }),
+        ...(section.whatNotToInclude || section.exclusions || []).map(ex => 
+          new Paragraph({
+            indent: { left: 720 },
+            children: [new TextRun({ text: `× ${ex}`, italics: true, color: "991b1b" })]
+          })
+        ),
+        new Paragraph({ text: "" }),
+        new Paragraph({ text: "" }),
+      ]),
+    ];
+
+    const doc = new Document({
+      sections: [{ properties: {}, children: docChildren }],
+    });
+
+    const blob = await Packer.toBlob(doc);
+    let name = scratchTopic || list[0]?.title || "Outline";
+    let cleaned = name
+      .replace(/[^a-zA-Z0-9\s-_]/g, "")
+      .trim()
+      .replace(/[\s_]+/g, "_");
+    saveAs(blob, `${cleaned}_${type}.docx`);
   };
 
   // --- End Narrator Logic ---
@@ -1815,11 +2538,11 @@ ${storyContextText.substring(0, 12000)}`
       const fullText = mode === "retell" 
       ? storySessions.map(s => s.versions[s.selectedIndex]).join("\n\n")
       : mode === "narrate"
-      ? sections.map(s => s.narrativeVersions && s.selectedNarrativeIndex !== undefined ? s.narrativeVersions[s.selectedNarrativeIndex] : s.narrative).filter(Boolean).join("\n\n")
-      : sections.map(s => `
+      ? activeSections.map(s => s.narrativeVersions && s.selectedNarrativeIndex !== undefined ? s.narrativeVersions[s.selectedNarrativeIndex] : s.narrative).filter(Boolean).join("\n\n")
+      : activeSections.map(s => `
 # SECTION ${s.sectionNumber || ""}: ${s.title.toUpperCase()}
 Time Period: ${s.timePeriod || "---"}
-Word Count Target: ${s.wordCountTarget || s.estimatedWordCount || 500} words
+Word Count Target: ${s.wordCountTarget || s.estimatedWordCount || 1500} words
 Narrative Beat: ${s.narrativeBeat || "---"}
 Primary Focus: ${s.primaryFocus || "---"}
 Boundaries: ${s.startEvent || "---"} to ${s.endEvent || "---"}
@@ -1926,27 +2649,30 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
           <div className="flex items-center bg-warm-ink/5 p-1 rounded-full border border-warm-ink/10 shadow-inner">
             <button
               onClick={() => setMode("retell")}
+              disabled={isNarratingAll || narratingIndex !== null}
               className={`flex items-center gap-2 px-6 py-2 rounded-full text-xs font-bold uppercase tracking-widest transition-all ${
                 mode === "retell" ? "bg-white text-warm-ink shadow-md" : "text-warm-ink/40 hover:text-warm-ink"
-              }`}
+              } disabled:opacity-30`}
             >
               <PenTool className="w-4 h-4" />
               Retell
             </button>
             <button
               onClick={() => setMode("narrate")}
+              disabled={isNarratingAll || narratingIndex !== null}
               className={`flex items-center gap-2 px-6 py-2 rounded-full text-xs font-bold uppercase tracking-widest transition-all ${
                 mode === "narrate" ? "bg-white text-warm-ink shadow-md" : "text-warm-ink/40 hover:text-warm-ink"
-              }`}
+              } disabled:opacity-30`}
             >
               <BookOpen className="w-4 h-4" />
               Narrate
             </button>
             <button
               onClick={() => setMode("outlining")}
+              disabled={isNarratingAll || narratingIndex !== null}
               className={`flex items-center gap-2 px-6 py-2 rounded-full text-xs font-bold uppercase tracking-widest transition-all ${
                 mode === "outlining" ? "bg-white text-warm-ink shadow-md" : "text-warm-ink/40 hover:text-warm-ink"
-              }`}
+              } disabled:opacity-30`}
             >
               <LayoutList className="w-4 h-4" />
               Outliner
@@ -2202,7 +2928,7 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
               className="space-y-12"
             >
               {/* Outline Phase */}
-              {(currentNarratorStep === "idle" || sections.length === 0) && (
+              {(currentNarratorStep === "idle" || activeSections.length === 0) && (
                 <div className="space-y-12">
                    {(!outlineSource && mode === "outlining") ? (
                      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -2311,33 +3037,29 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
               )}
 
               {/* Research & Narration Phase */}
-              {sections.length > 0 && (
+              {activeSections.length > 0 && (
                 <section className="space-y-12">
                   {/* Summary Card */}
                   <div className="bg-white border border-warm-ink/10 rounded-[2.5rem] p-10 shadow-xl space-y-8">
                     {/* Stepper Navigation */}
                     <div className="flex items-center gap-2 overflow-x-auto pb-4 scrollbar-hide">
                       {steps.map((step, idx) => {
-                        const isReached = steps.indexOf(maxReachedStep) >= idx;
                         const isActive = currentNarratorStep === step;
                         return (
                           <div key={step} className="flex items-center gap-2 flex-shrink-0">
                             <button
                               onClick={() => goToStep(step)}
-                              disabled={!isReached}
-                              className={`px-4 py-2 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all whitespace-nowrap ${
+                              className={`px-4 py-2 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all whitespace-nowrap cursor-pointer ${
                                 isActive 
                                   ? 'bg-accent text-white shadow-lg shadow-accent/20' 
-                                  : isReached 
-                                    ? 'bg-warm-ink/5 text-warm-ink/60 hover:bg-warm-ink/10' 
-                                    : 'bg-warm-ink/[0.02] text-warm-ink/20 cursor-not-allowed border border-warm-ink/5'
+                                  : 'bg-warm-ink/5 text-warm-ink/60 hover:bg-warm-ink/10'
                               }`}
                             >
                               <span className="opacity-40 mr-1.5">{idx + 1}.</span>
                               {step}
                             </button>
                             {idx < steps.length - 1 && (
-                              <ChevronRight className={`w-3 h-3 ${steps.indexOf(maxReachedStep) > idx ? 'text-accent/40' : 'text-warm-ink/10'}`} />
+                              <ChevronRight className="w-3 h-3 text-accent/40" />
                             )}
                           </div>
                         );
@@ -2365,6 +3087,29 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                       </div>
 
                       <div className="flex items-center gap-4">
+                        {mode === "narrate" && (
+                          <button
+                            onClick={handleNarrateAll}
+                            disabled={isNarratingAll || narratingIndex !== null}
+                            className={`flex items-center gap-2 text-xs font-bold uppercase tracking-widest px-6 py-3 rounded-full hover:scale-105 active:scale-95 transition-all shadow-xl cursor-pointer ${
+                              isNarratingAll 
+                                ? 'bg-amber-600 text-white shadow-amber-600/20 animate-pulse' 
+                                : 'bg-accent text-white hover:bg-accent/90 shadow-accent/20'
+                            }`}
+                          >
+                            {isNarratingAll ? (
+                              <>
+                                <Loader2 className="w-4 h-4 animate-spin" />
+                                Writing Chapters...
+                              </>
+                            ) : (
+                              <>
+                                <Sparkles className="w-4 h-4 text-white" />
+                                Write All Narratives
+                              </>
+                            )}
+                          </button>
+                        )}
                         <button 
                           onClick={downloadAsDocx}
                           className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest bg-green-600 text-white px-6 py-3 rounded-full hover:scale-105 active:scale-95 transition-all shadow-xl shadow-green-600/20"
@@ -2374,7 +3119,7 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                         </button>
                         <button 
                           onClick={copyAll}
-                          disabled={sections.every(s => !s.narrative && mode !== "outlining")}
+                          disabled={activeSections.every(s => !s.narrative && mode !== "outlining")}
                           className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest bg-accent text-white px-6 py-3 rounded-full hover:scale-105 active:scale-95 transition-all shadow-xl shadow-accent/20 disabled:opacity-30 disabled:hover:scale-100"
                         >
                           <Copy className="w-4 h-4" />
@@ -2385,7 +3130,7 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
 
                     <div className="flex flex-wrap gap-4">
                       <div className="text-center p-5 bg-warm-ink/5 rounded-[2rem] border border-warm-ink/5 min-w-[120px] flex-1 sm:flex-initial">
-                        <div className="text-3xl font-serif font-bold text-accent">{sections.length}</div>
+                        <div className="text-3xl font-serif font-bold text-accent">{activeSections.length}</div>
                         <div className="text-[10px] uppercase font-bold text-warm-ink/30 tracking-widest">Sections</div>
                       </div>
                       <div className="text-center p-5 bg-warm-ink/5 rounded-[2rem] border border-warm-ink/5 min-w-[160px] flex-1 sm:flex-initial">
@@ -2401,6 +3146,24 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                         <div className="text-[10px] uppercase font-bold text-warm-ink/30 tracking-widest">Total Narrative Words</div>
                       </div>
                     </div>
+
+                    {isNarratingAll && (
+                      <div className="bg-amber-500/5 border-2 border-amber-500/15 rounded-3xl p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4 animate-pulse">
+                        <div className="flex items-center gap-3">
+                          <Loader2 className="w-5 h-5 text-amber-600 animate-spin flex-shrink-0" />
+                          <div>
+                            <h5 className="text-xs font-black uppercase tracking-widest text-amber-800">Sequential Narrative Engine Active</h5>
+                            <p className="text-[10px] text-warm-ink/50 font-sans">
+                              Writing chapters sequentially. Please do not close this tab or navigate away.
+                              Generating Chapter {(narratingIndex ?? 0) + 1} of {activeSections.length}...
+                            </p>
+                          </div>
+                        </div>
+                        <div className="text-xs font-mono text-amber-800 font-bold bg-amber-500/10 px-3 py-1.5 rounded-xl border border-amber-500/15">
+                          {Math.round((((narratingIndex ?? 0)) / activeSections.length) * 100)}% Complete
+                        </div>
+                      </div>
+                    )}
 
                     {mode === "outlining" && outlineSource === "existing" && (
                       <div className="p-6 bg-amber-50/50 border border-amber-500/15 rounded-[2rem] space-y-4">
@@ -2712,42 +3475,192 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                             <span className="block text-xs font-normal opacity-80">
                               {mode === "outlining" 
                                 ? "Conduct forensic research to identify hidden details and characters."
-                                : `Flesh out bullets with detail for all ${sections.length} sections.`}
+                                : `Flesh out bullets with detail for all ${activeSections.length} sections.`}
                             </span>
                           </div>
                         </button>
-                        {steps.indexOf(maxReachedStep) > steps.indexOf("parsed") && (
-                          <button
-                            onClick={goForward}
-                            className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline"
-                          >
-                            Skip to Researched Dossier →
-                          </button>
-                        )}
+                        <button
+                          onClick={goForward}
+                          className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline cursor-pointer"
+                        >
+                          Skip to Researched Dossier →
+                        </button>
                       </div>
                     )}
 
                     {currentNarratorStep === "researched" && mode === "outlining" && (
                       <div className="pt-6 border-t border-warm-ink/5 flex flex-col gap-4">
                         <button
-                          onClick={() => handlePlanOutline(sections)}
+                          onClick={() => handleDetectSuspense(sections)}
                           disabled={narratorIsProcessing}
                           className="w-full bg-accent text-white py-6 rounded-3xl font-bold flex items-center justify-center gap-4 hover:scale-[1.02] active:scale-[0.98] transition-all shadow-xl shadow-accent/20"
                         >
-                          {narratorIsProcessing ? <Loader2 className="w-6 h-6 animate-spin" /> : <LayoutList className="w-6 h-6" />}
+                          {narratorIsProcessing ? <Loader2 className="w-6 h-6 animate-spin" /> : <Eye className="w-6 h-6" />}
                           <div className="text-left">
-                            <span className="block text-sm uppercase tracking-widest font-black">Step 3: Forensic Planning</span>
-                            <span className="block text-xs font-normal opacity-80">Audit structure, perspective, and repetition before rewriting.</span>
+                            <span className="block text-sm uppercase tracking-widest font-black">Step 3: Suspense Detection</span>
+                            <span className="block text-xs font-normal opacity-80">Detect, analyze and select the story's suspense strategy.</span>
                           </div>
                         </button>
-                        {steps.indexOf(maxReachedStep) > steps.indexOf("researched") && (
+                        <button
+                          onClick={goForward}
+                          className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline cursor-pointer"
+                        >
+                          Skip to Suspense Detection Page →
+                        </button>
+                      </div>
+                    )}
+
+                    {currentNarratorStep === "suspensed" && mode === "outlining" && (
+                      <div className="space-y-8 pt-10 border-t border-warm-ink/5">
+                        <div className="bg-blue-500/5 border border-blue-500/10 rounded-3xl p-6 flex items-start gap-4 mb-4">
+                          <div className="p-3 bg-blue-500/10 text-blue-600 rounded-2xl">
+                            <Sparkles className="w-6 h-6 animate-pulse" />
+                          </div>
+                          <div className="space-y-1">
+                            <h4 className="text-sm font-black uppercase tracking-widest text-blue-950 font-sans">Interactive Suspense Detection</h4>
+                            <p className="text-[11px] text-warm-ink/60 leading-relaxed font-sans">
+                              We must establish an inviolable narrative suspense design. Select one of the detected options below, chat with the model to refine or suggest custom twists, and establish the strategic withhold-and-reveal model before planning.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                          {/* Left Panel: Suspense Strategies */}
+                          <div className="lg:col-span-7 space-y-6 animate-in fade-in slide-in-from-bottom duration-300">
+                            <h5 className="text-[10px] font-black uppercase tracking-widest text-warm-ink/50 mb-2">Available Suspense Strategies</h5>
+                            <div className="grid grid-cols-1 gap-4">
+                              {suspenseOptions.map((opt) => {
+                                const isSelected = selectedSuspenseOptionId === opt.id;
+                                return (
+                                  <div
+                                    key={opt.id}
+                                    onClick={() => setSelectedSuspenseOptionId(opt.id)}
+                                    className={`p-6 rounded-2xl border-2 transition-all cursor-pointer select-none space-y-4 ${
+                                      isSelected
+                                        ? "bg-white border-blue-500 shadow-lg shadow-blue-500/5"
+                                        : "bg-white border-warm-ink/5 hover:border-warm-ink/10"
+                                    }`}
+                                  >
+                                    <div className="flex items-start justify-between">
+                                      <div className="space-y-1">
+                                        <h6 className="font-serif font-bold text-base text-warm-ink flex items-center gap-2">
+                                          {opt.title}
+                                        </h6>
+                                        <p className="text-xs text-warm-ink/65 leading-relaxed font-sans">
+                                          {opt.description}
+                                        </p>
+                                      </div>
+                                      <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all ${
+                                        isSelected ? "border-blue-500 bg-blue-500 text-white" : "border-warm-ink/20"
+                                      }`}>
+                                        {isSelected && <CheckCircle2 className="w-3.5 h-3.5" />}
+                                      </div>
+                                    </div>
+
+                                    {/* Pros & Cons */}
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-4 border-t border-warm-ink/5 text-[11px]">
+                                      <div className="space-y-1 bg-emerald-50/50 rounded-xl p-3 border border-emerald-100/50">
+                                        <div className="font-extrabold uppercase text-emerald-800 tracking-wider font-sans mb-1">Pros / Strengths:</div>
+                                        {opt.pros.map((p, i) => (
+                                          <div key={i} className="text-emerald-950 font-sans leading-tight">• {p}</div>
+                                        ))}
+                                      </div>
+                                      <div className="space-y-1 bg-red-50/50 rounded-xl p-3 border border-red-100/50">
+                                        <div className="font-extrabold uppercase text-red-800 tracking-wider font-sans mb-1">Cons / Risks:</div>
+                                        {opt.cons.map((c, i) => (
+                                          <div key={i} className="text-red-950 font-sans leading-tight">• {c}</div>
+                                        ))}
+                                      </div>
+                                    </div>
+
+                                    <div className="mt-3 text-[11px] bg-neutral-50 rounded-xl p-3 border border-neutral-150 leading-relaxed text-neutral-700">
+                                      <strong className="text-neutral-900 block font-sans uppercase text-[9px] tracking-widest font-extrabold mb-1">Rule/Withheld:</strong>
+                                      {opt.preservationRule}
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            {customSuspenseBrief && (
+                              <div className="bg-amber-50/50 border border-amber-200/50 rounded-2xl p-5 space-y-2">
+                                <h6 className="text-[10px] font-black uppercase tracking-widest text-amber-900 font-sans flex items-center gap-1.5">
+                                  <Sparkles className="w-4 h-4 text-amber-600 animate-pulse" />
+                                  Active Alignment Strategy Brief (Refined)
+                                </h6>
+                                <p className="text-xs text-amber-950 leading-relaxed font-sans whitespace-pre-line">
+                                  {customSuspenseBrief}
+                                </p>
+                              </div>
+                            )}
+                          </div>
+
+                          {/* Right Panel: Interactive Discussion */}
+                          <div className="lg:col-span-5 flex flex-col bg-white border border-warm-ink/10 rounded-3xl h-[600px] overflow-hidden shadow-sm">
+                            <div className="p-5 border-b border-warm-ink/5 bg-neutral-50/50 flex items-center justify-between">
+                              <h5 className="text-[10px] font-black uppercase tracking-widest text-neutral-700 font-sans">Suspense Consultant Chat</h5>
+                              <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-ping" />
+                            </div>
+
+                            {/* Chat history list */}
+                            <div className="flex-1 overflow-y-auto p-5 space-y-4 font-sans text-xs">
+                              {suspenseDialogue.map((msg, idx) => {
+                                const isUser = msg.role === "user";
+                                return (
+                                  <div key={idx} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+                                    <div className={`p-4 rounded-2xl max-w-[85%] leading-relaxed ${
+                                      isUser 
+                                        ? "bg-warm-ink text-warm-bg rounded-br-none" 
+                                        : "bg-neutral-100 text-neutral-800 rounded-bl-none"
+                                    }`}>
+                                      <p className="whitespace-pre-wrap">{msg.parts?.[0]?.text || ""}</p>
+                                    </div>
+                                  </div>
+                                );
+                              })}
+                            </div>
+
+                            {/* Input box */}
+                            <div className="p-4 border-t border-warm-ink/5 bg-neutral-50/50 space-y-3">
+                              <div className="flex gap-2">
+                                <textarea
+                                  ref={suspenseTextareaRef}
+                                  value={suspenseUserText}
+                                  onChange={(e) => setSuspenseUserText(e.target.value)}
+                                  placeholder="Suggest modifications, add secret letters/clues to withhold, or ask questions..."
+                                  disabled={narratorIsProcessing}
+                                  className="flex-1 px-4 py-3 bg-white border border-warm-ink/10 rounded-xl text-xs font-sans placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-blue-500 min-h-[60px] resize"
+                                  style={{ maxHeight: "300px" }}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={handleSendSuspenseMessage}
+                                  disabled={narratorIsProcessing || !suspenseUserText.trim()}
+                                  className="bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white px-5 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center transition-all cursor-pointer active:scale-95 flex-shrink-0"
+                                >
+                                  {narratorIsProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : "Send"}
+                                </button>
+                              </div>
+                              <p className="text-[9px] text-neutral-400 font-sans text-center leading-tight">
+                                Send custom instructions to have the consultant update suggestions dynamically.
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="pt-6 border-t border-warm-ink/5 flex flex-col gap-4">
                           <button
-                            onClick={goForward}
-                            className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline"
+                            onClick={() => handlePlanOutline(sections)}
+                            disabled={narratorIsProcessing}
+                            className="w-full bg-blue-600 hover:bg-blue-700 text-white py-6 rounded-3xl font-bold flex items-center justify-center gap-4 hover:scale-[1.02] active:scale-[0.98] transition-all shadow-xl shadow-blue-600/20"
                           >
-                            Skip to Planning Strategy →
+                            {narratorIsProcessing ? <Loader2 className="w-6 h-6 animate-spin" /> : <LayoutList className="w-6 h-6" />}
+                            <div className="text-left">
+                              <span className="block text-sm uppercase tracking-widest font-black">Step 4: Proceed to Forensic Planning</span>
+                              <span className="block text-xs font-normal opacity-90">Inject chosen suspense pattern rules and facts to draft the structured blueprint.</span>
+                            </div>
                           </button>
-                        )}
+                        </div>
                       </div>
                     )}
 
@@ -2780,14 +3693,12 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                               <span className="block text-xs font-normal opacity-80">Detect structural overlaps, repetition, and factual errors.</span>
                             </div>
                           </button>
-                          {steps.indexOf(maxReachedStep) > steps.indexOf("planned") && (
-                            <button
-                              onClick={goForward}
-                              className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline"
-                            >
-                              Skip to Conflict Detection →
-                            </button>
-                          )}
+                          <button
+                            onClick={goForward}
+                            className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline cursor-pointer"
+                          >
+                            Skip to Conflict Detection →
+                          </button>
                         </div>
                       </div>
                     )}
@@ -2821,14 +3732,12 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                               <span className="block text-xs font-normal opacity-80">Apply forensic details and planning to rebuild the outline.</span>
                             </div>
                           </button>
-                          {steps.indexOf(maxReachedStep) > steps.indexOf("detected") && (
-                            <button
-                              onClick={goForward}
-                              className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline"
-                            >
-                              Skip to Final Outline →
-                            </button>
-                          )}
+                          <button
+                            onClick={goForward}
+                            className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline cursor-pointer"
+                          >
+                            Skip to Final Outline →
+                          </button>
                         </div>
                       </div>
                     )}
@@ -2857,64 +3766,195 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                               <span className="block text-xs font-normal opacity-90">Deep chronological check to scan for subtle leaks, suspense breaks, or faith/trust telegraphing.</span>
                             </div>
                           </button>
-                          {steps.indexOf(maxReachedStep) > steps.indexOf("refined") && (
-                            <button
-                              onClick={goForward}
-                              className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline"
-                            >
-                              Skip to Audit Report →
-                            </button>
-                          )}
+                          <button
+                            onClick={goForward}
+                            className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline cursor-pointer"
+                          >
+                            Skip to Audit Report →
+                          </button>
                         </div>
                       </div>
                     )}
 
                     {currentNarratorStep === "doublechecked" && mode === "outlining" && (
-                      <div className="space-y-8 pt-10 border-t border-warm-ink/5">
-                        <div className="bg-red-50/50 border-2 border-red-200/40 rounded-3xl p-8 space-y-6">
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-3 text-red-900">
-                              <AlertCircle className="w-6 h-6 text-red-700" />
-                              <h4 className="text-sm font-black uppercase tracking-widest">Reconstructed Outline Vetting Report</h4>
+                      <div className="space-y-8 pt-10 border-t border-warm-ink/5 animate-fadeIn">
+                        {/* Interactive Checkable Violations Checklist */}
+                        <div className="space-y-6">
+                          <div className="flex items-center justify-between pb-2 border-b border-warm-ink/10">
+                            <div className="flex items-center gap-3">
+                              <ListChecks className="w-6 h-6 text-accent" />
+                              <h4 className="text-sm font-black uppercase tracking-widest text-warm-ink">Forensic Auditing Checklist</h4>
                             </div>
-                            <span className="text-[10px] font-black uppercase tracking-widest bg-red-100 text-red-800 px-3 py-1 rounded-full">Report Ready</span>
+                            <span className="text-[10px] font-black uppercase tracking-widest bg-accent-tag text-accent px-3 py-1 rounded-full border border-accent/10">
+                              {outlineViolations.length} Violations Flagged
+                            </span>
                           </div>
-                          
-                          <EditableText 
-                            label="Reconstructed Outline Violations Report" 
-                            value={reconstructedOutlineViolationsReport} 
-                            onChange={setReconstructedOutlineViolationsReport}
-                            multiline
-                            markdown
-                          />
+
+                          {outlineViolations.length > 0 ? (
+                            <div className="space-y-6">
+                              <div className="flex items-center justify-between bg-warm-ink/5 p-4 rounded-2xl border border-warm-ink/10">
+                                <div>
+                                  <h5 className="text-[11px] font-black uppercase tracking-widest text-warm-ink">Apply Corrections Selector</h5>
+                                  <p className="text-[11px] text-warm-ink/50 font-sans">Toggle which forensic purges you want to apply to the final outline.</p>
+                                </div>
+                                <div className="flex gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setCheckedViolationIds(outlineViolations.map(v => v.id))}
+                                    className="text-[10px] font-bold uppercase tracking-wider bg-white border border-warm-ink/10 text-warm-ink/70 hover:bg-warm-ink/5 px-2.5 py-1.5 rounded-lg transition-all cursor-pointer"
+                                  >
+                                    Check All
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setCheckedViolationIds([])}
+                                    className="text-[10px] font-bold uppercase tracking-wider bg-white border border-warm-ink/10 text-warm-ink/70 hover:bg-warm-ink/5 px-2.5 py-1.5 rounded-lg transition-all cursor-pointer"
+                                  >
+                                    Uncheck All
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="space-y-4 max-h-[500px] overflow-y-auto pr-2">
+                                {outlineViolations.map((violation) => {
+                                  const isChecked = checkedViolationIds.includes(violation.id);
+                                  const section = sections.find(s => s.sectionNumber === violation.sectionNumber);
+                                  const sectionTitle = section ? section.title : `Section ${violation.sectionNumber}`;
+                                  
+                                  return (
+                                    <div 
+                                      key={violation.id} 
+                                      className={`p-6 rounded-2xl border transition-all ${
+                                        isChecked 
+                                          ? 'bg-accent/[0.02] border-accent/20' 
+                                          : 'bg-white border-warm-ink/5 opacity-60'
+                                      }`}
+                                    >
+                                      <div className="flex items-start gap-4">
+                                        <input
+                                          type="checkbox"
+                                          id={violation.id}
+                                          checked={isChecked}
+                                          onChange={(e) => {
+                                            if (e.target.checked) {
+                                              setCheckedViolationIds(prev => [...prev, violation.id]);
+                                            } else {
+                                              setCheckedViolationIds(prev => prev.filter(id => id !== violation.id));
+                                            }
+                                          }}
+                                          className="mt-1 w-4 h-4 rounded border-warm-ink/20 text-accent focus:ring-accent cursor-pointer"
+                                        />
+                                        <div className="flex-1 space-y-3">
+                                          <div className="flex flex-wrap items-center gap-2 justify-between">
+                                            <div className="space-y-0.5">
+                                              <span className="text-[10px] font-black uppercase tracking-widest text-warm-ink/40">Section {violation.sectionNumber}</span>
+                                              <h6 className="text-xs font-bold text-warm-ink">{sectionTitle} — Bullet #{violation.bulletIndex + 1}</h6>
+                                            </div>
+                                            <span className="text-[9px] font-black uppercase tracking-widest bg-red-100/60 text-red-800 px-2 py-0.5 rounded-full border border-red-200/50">
+                                              {violation.violationType}
+                                            </span>
+                                          </div>
+
+                                          <p className="text-xs text-red-900 bg-red-50/50 p-3 rounded-xl border border-red-100/50 font-sans leading-relaxed">
+                                            <span className="font-bold uppercase tracking-wide text-[10px] text-red-800 block mb-1">Violation Explanation</span>
+                                            {violation.explanation}
+                                            {violation.violatingPhrase && (
+                                              <span className="block mt-1 font-mono text-[10px] text-red-600">
+                                                Flagged Phrase: &quot;{violation.violatingPhrase}&quot;
+                                              </span>
+                                            )}
+                                          </p>
+
+                                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                                            <div className="bg-neutral-50 p-3.5 rounded-xl border border-neutral-200/50 space-y-1">
+                                              <span className="text-[9px] font-black uppercase tracking-widest text-neutral-400 block">Original Text</span>
+                                              <p className="font-sans leading-relaxed text-neutral-600 block">{violation.originalBulletText}</p>
+                                            </div>
+                                            <div className="bg-emerald-50/40 p-3.5 rounded-xl border border-emerald-200/30 space-y-2 flex flex-col">
+                                              <div className="flex items-center justify-between">
+                                                <span className="text-[9px] font-black uppercase tracking-widest text-emerald-600 font-bold font-sans flex items-center gap-1">
+                                                  <Edit3 className="w-2.5 h-2.5" /> Surgical Proposed Purge (Editable)
+                                                </span>
+                                              </div>
+                                              <textarea
+                                                value={violation.correctedBulletText}
+                                                onChange={(e) => {
+                                                  const newVal = e.target.value;
+                                                  setOutlineViolations(prev => prev.map(v => v.id === violation.id ? { ...v, correctedBulletText: newVal } : v));
+                                                }}
+                                                className="w-full text-xs font-sans leading-relaxed text-emerald-950 font-medium bg-transparent border-none p-0 focus:outline-none focus:ring-0 focus:border-none resize-y min-h-[90px] placeholder-emerald-800/40 text-left"
+                                                placeholder="Craft/refine the corrected bullet point here..."
+                                              />
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="bg-emerald-500/5 border-2 border-emerald-500/15 rounded-3xl p-8 space-y-3 text-center">
+                              <CheckCircle2 className="w-10 h-10 text-emerald-600 mx-auto" />
+                              <h5 className="text-sm font-black uppercase tracking-widest text-emerald-950 font-sans">✨ Complete Perfection</h5>
+                              <p className="text-xs text-warm-ink/70 max-w-md mx-auto leading-relaxed">
+                                Absolute Outliner forensic algorithms analyzed every single bullet against the Retelling and Vetting protocols and found no critical violations. Your narrative structure is completely flawless and ready to be finalized!
+                              </p>
+                            </div>
+                          )}
                         </div>
 
+                        {/* Collapsible raw logs */}
+                        <div className="border border-warm-ink/10 rounded-3xl overflow-hidden p-6 bg-red-50/50 space-y-4">
+                          <button 
+                            onClick={() => setShowTechnicalAuditReport(!showTechnicalAuditReport)}
+                            className="w-full flex items-center justify-between text-left cursor-pointer"
+                          >
+                            <div className="flex items-center gap-3 text-red-950">
+                              <AlertCircle className="w-5 h-5 text-red-700" />
+                              <h5 className="text-[11px] font-black uppercase tracking-widest">Technical Vetting Analysis Report Logs</h5>
+                            </div>
+                            <ChevronDown className={`w-4 h-4 text-warm-ink/50 transition-transform ${showTechnicalAuditReport ? 'rotate-180' : ''}`} />
+                          </button>
+                          {showTechnicalAuditReport && (
+                            <div className="pt-4 border-t border-warm-ink/10">
+                              <EditableText 
+                                label="Reconstructed Outline Violations Report" 
+                                value={reconstructedOutlineViolationsReport} 
+                                onChange={setReconstructedOutlineViolationsReport}
+                                multiline
+                                markdown
+                              />
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Apply corrections action button */}
                         <div className="flex flex-col gap-4">
                           <button
                             onClick={() => handleCorrectOutlineViolations(sections)}
                             disabled={narratorIsProcessing}
-                            className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-6 rounded-3xl font-bold flex items-center justify-center gap-4 hover:scale-[1.02] active:scale-[0.98] transition-all shadow-xl shadow-emerald-600/20"
+                            className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-6 rounded-3xl font-bold flex items-center justify-center gap-4 hover:scale-[1.02] active:scale-[0.98] transition-all shadow-xl shadow-emerald-600/20 cursor-pointer"
                           >
                             {narratorIsProcessing ? <Loader2 className="w-6 h-6 animate-spin" /> : <PenTool className="w-6 h-6" />}
                             <div className="text-left">
-                              <span className="block text-sm uppercase tracking-widest font-black">Step 7: Surgical Outline Purging & Correction</span>
-                              <span className="block text-xs font-normal opacity-90">Rewrite the identified violating statements to remove faith/trust cues and other leaks while keeping 100% depth.</span>
+                              <span className="block text-sm uppercase tracking-widest font-black">Step 7: Apply Outline Correction &amp; Purging</span>
+                              <span className="block text-xs font-normal opacity-90">Apply the selected (checked) corrections directly to the outline events and proceed.</span>
                             </div>
                           </button>
-                          {steps.indexOf(maxReachedStep) > steps.indexOf("doublechecked") && (
-                            <button
-                              onClick={goForward}
-                              className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline"
-                            >
-                              Skip to Corrected Outline →
-                            </button>
-                          )}
+                          <button
+                            onClick={goForward}
+                            className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline cursor-pointer"
+                          >
+                            Skip to Corrected Outline →
+                          </button>
                         </div>
                       </div>
                     )}
 
                     {currentNarratorStep === "corrected" && mode === "outlining" && (
-                      <div className="space-y-8 pt-10 border-t border-warm-ink/5">
+                      <div className="space-y-8 pt-10 border-t border-warm-ink/5 animate-fade-in">
                         <div className="bg-emerald-500/5 border-2 border-emerald-500/15 rounded-3xl p-8 space-y-4">
                           <div className="flex items-center gap-3 text-emerald-800">
                             <CheckCircle2 className="w-6 h-6" />
@@ -2928,6 +3968,82 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                           </p>
                         </div>
 
+                        {/* Interactive Editor Correction Chat Box */}
+                        <div className="bg-white border border-warm-ink/10 rounded-3xl overflow-hidden shadow-sm">
+                          <div className="bg-neutral-50 px-6 py-5 border-b border-warm-ink/5">
+                            <div className="flex items-center justify-between">
+                              <div className="flex items-center gap-2.5">
+                                <PenTool className="w-5 h-5 text-accent" />
+                                <div>
+                                  <h4 className="text-xs font-black uppercase tracking-widest text-warm-ink/80 animate-pulse-subtle">Interactive Fine-Tuning &amp; Corrections</h4>
+                                  <p className="text-[10px] text-warm-ink/40 font-sans">Direct the Lead Editor to perform custom changes, delete/add sections, or tweak chronological facts in the outline.</p>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          <div className="p-6 space-y-4 max-h-[350px] overflow-y-auto bg-neutral-50/20 font-sans text-xs">
+                            {customCorrectionDialogue.length === 0 ? (
+                              <div className="text-center py-6 text-warm-ink/40 space-y-2">
+                                <MessageSquare className="w-8 h-8 mx-auto stroke-[1.5]" />
+                                <p className="text-[11px]">No custom adjustments made yet. Describe what you'd like corrected below.</p>
+                              </div>
+                            ) : (
+                              <div className="space-y-3">
+                                {customCorrectionDialogue.map((msg, mIdx) => (
+                                  <div 
+                                    key={mIdx} 
+                                    className={`flex flex-col space-y-1 p-4 rounded-2xl max-w-[85%] ${
+                                      msg.role === "user" 
+                                        ? "bg-accent/5 border border-accent/10 ml-auto text-warm-ink" 
+                                        : "bg-white border border-warm-ink/5 mr-auto text-warm-ink/80 shadow-sm"
+                                    }`}
+                                  >
+                                    <span className="text-[9px] font-black uppercase tracking-widest text-warm-ink/30">
+                                      {msg.role === "user" ? "Your Request" : "Lead Editor"}
+                                    </span>
+                                    <p className="whitespace-pre-wrap leading-relaxed text-xs">{msg.parts?.[0]?.text}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="p-4 border-t border-warm-ink/5 bg-neutral-50/50 space-y-3">
+                            <div className="flex gap-2">
+                              <textarea
+                                ref={customCorrectionTextareaRef}
+                                value={customCorrectionUserText}
+                                onChange={(e) => setCustomCorrectionUserText(e.target.value)}
+                                placeholder="Describe any custom changes, deletion requests, pacing adjustments, or missing facts to reformulate..."
+                                disabled={narratorIsProcessing}
+                                className="flex-1 px-4 py-3 bg-white border border-warm-ink/10 rounded-xl text-xs font-sans placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-blue-500 min-h-[60px] max-h-[200px] resize"
+                              />
+                              <button
+                                type="button"
+                                onClick={handleApplyCustomCorrection}
+                                disabled={narratorIsProcessing || !customCorrectionUserText.trim()}
+                                className="px-5 bg-accent hover:bg-accent/90 disabled:bg-accent/30 text-white rounded-xl text-xs font-black uppercase tracking-widest transition-all shadow-md flex items-center justify-center gap-2 cursor-pointer self-end py-3 h-[42px]"
+                              >
+                                {narratorIsProcessing ? <Loader2 className="w-4 h-4 animate-spin" /> : "Apply"}
+                              </button>
+                            </div>
+                            {customCorrectionDialogue.length > 0 && (
+                              <div className="flex justify-start">
+                                <button
+                                  onClick={() => {
+                                    setCustomCorrectionDialogue([]);
+                                    setCustomCorrectionUserText("");
+                                  }}
+                                  className="text-[10px] text-red-500 hover:underline font-bold uppercase tracking-wider"
+                                >
+                                  Clear History
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
                         <div className="bg-warm-ink/[0.02] border border-warm-ink/10 rounded-2xl p-6 flex flex-col md:flex-row items-center justify-between gap-4">
                           <div className="space-y-1">
                             <h5 className="text-xs font-black uppercase tracking-widest text-warm-ink/60">Ready to Narrate?</h5>
@@ -2936,7 +4052,9 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                           <button
                             onClick={() => {
                               setMode("narrate");
-                              setCurrentNarratorStep("refined");
+                              if (!["doublechecked", "corrected"].includes(currentNarratorStep)) {
+                                setCurrentNarratorStep("refined");
+                              }
                             }}
                             className="bg-accent hover:bg-accent/90 text-white font-bold text-xs uppercase tracking-wider px-6 py-4 rounded-xl flex items-center gap-2 transition-all shadow-md active:scale-95"
                           >
@@ -2947,7 +4065,7 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                       </div>
                     )}
 
-                    {currentNarratorStep === "refined" && mode === "narrate" && (
+                    {["refined", "doublechecked", "corrected"].includes(currentNarratorStep) && mode === "narrate" && (
                       <div className="pt-6 border-t border-warm-ink/5 flex flex-col gap-6">
                         <div className="bg-emerald-500/5 border border-emerald-500/10 rounded-[2rem] p-8 space-y-4">
                           <div className="flex items-center gap-3 text-emerald-800">
@@ -2959,7 +4077,7 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                             Each refined narrative segment needs a dedicated background research dossier to guide the story depth and enforce target word counts.
                           </p>
 
-                          {sections.some(s => !s.researchBrief) ? (
+                          {activeSections.some(s => !s.researchBrief) ? (
                             <div className="text-xs font-bold text-amber-800 bg-amber-500/10 p-4 rounded-2xl border border-amber-500/10 flex items-start gap-2">
                               <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
                               <div>
@@ -2980,14 +4098,14 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                           <div className="flex flex-wrap gap-4 pt-2">
                             <button
                               onClick={() => {
-                                setSections(prev => prev.map(s => ({ ...s, researchBrief: "" })));
+                                updateActiveSections(prev => prev.map(s => ({ ...s, researchBrief: "" })));
                                 setCurrentNarratorStep("parsed");
                               }}
                               className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-2xl text-xs font-black uppercase tracking-wider transition-all shadow-md hover:scale-[1.02]"
                             >
                               Run Deep Research on Refined Outline
                             </button>
-                            {sections.some(s => !s.researchBrief) && (
+                            {activeSections.some(s => !s.researchBrief) && (
                               <button
                                 onClick={() => {
                                   setCurrentNarratorStep("parsed");
@@ -3068,9 +4186,82 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                     </div>
                   )}
 
+                  {/* Outline Comparison / Version Selection Section */}
+                  {currentNarratorStep !== "idle" && uncorrectedSections.length > 0 && (
+                    <div className="bg-amber-50/50 border border-amber-200/60 rounded-[2rem] p-8 space-y-4 shadow-sm">
+                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+                        <div className="space-y-1">
+                          <h4 className="font-serif font-bold text-lg text-amber-900 flex items-center gap-2">
+                            <Sparkles className="w-5 h-5 text-amber-600 animate-pulse" />
+                            Outline Rectified & Vetted
+                          </h4>
+                          <p className="text-xs text-amber-800/80 leading-relaxed max-w-2xl font-sans">
+                            We detected structure, forward-motion, or date formatting violations in the initial reconstruction. The outline has been fully corrected. You can select either version to run Narration Mode, or download them individually.
+                          </p>
+                        </div>
+                        <div className="flex flex-wrap gap-2">
+                          <button
+                            type="button"
+                            onClick={() => downloadFullOutline("uncorrected")}
+                            className="bg-white hover:bg-amber-50 text-amber-800 border border-amber-200 text-xs px-4 py-2 rounded-xl flex items-center gap-1.5 transition-all font-bold cursor-pointer"
+                            title="Download uncorrected original reconstruction"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            Download Uncorrected
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => downloadFullOutline("corrected")}
+                            className="bg-emerald-600 hover:bg-emerald-700 text-white text-xs px-4 py-2 rounded-xl flex items-center gap-1.5 transition-all font-bold shadow-sm cursor-pointer"
+                            title="Download corrected vetted reconstruction"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            Download Vetted (New)
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="border-t border-amber-200/45 pt-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <span className="text-[10px] uppercase tracking-wider font-extrabold text-amber-700 font-sans">ACTIVE OUTLINE SELECTOR FOR NARRATION:</span>
+                        <div className="inline-flex rounded-xl border border-amber-200/80 bg-white p-1 shadow-sm">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedOutlineType("uncorrected");
+                              confetti({ particleCount: 30, spread: 35, colors: ["#d97706"] });
+                            }}
+                            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                              selectedOutlineType === "uncorrected"
+                                ? "bg-amber-500 text-white shadow-sm"
+                                : "text-amber-800 hover:bg-amber-50/50"
+                            }`}
+                          >
+                            <AlertCircle className="w-3.5 h-3.5" />
+                            Use Uncorrected (Old Outline)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedOutlineType("corrected");
+                              confetti({ particleCount: 50, spread: 45, colors: ["#10b981"] });
+                            }}
+                            className={`px-4 py-2 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer ${
+                              selectedOutlineType === "corrected"
+                                ? "bg-emerald-600 text-white shadow-sm"
+                                : "text-emerald-800 hover:bg-emerald-50/50"
+                            }`}
+                          >
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            Use Vetted Outline (Recommended)
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
                   {/* Sections List */}
                   <div className="space-y-12">
-                    {sections.map((section, idx) => (
+                    {activeSections.map((section, idx) => (
                       <div key={idx} className="relative pl-12 border-l-2 border-warm-ink/5 space-y-6 group">
                         <div className="absolute -left-[13px] top-0 w-6 h-6 bg-warm-bg border-4 border-accent rounded-full group-hover:scale-125 transition-transform" />
                         
@@ -3114,8 +4305,8 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                                   <Sparkles className="w-3 h-3 text-amber-500" />
                                   <EditableText 
                                     label="Word Count Target" 
-                                    value={String(section.wordCountTarget || section.estimatedWordCount || 500)} 
-                                    onChange={(v) => updateSection(section.id, { wordCountTarget: parseInt(v) || 500, estimatedWordCount: parseInt(v) || 500 })}
+                                    value={String(section.wordCountTarget || section.estimatedWordCount || 1500)} 
+                                    onChange={(v) => updateSection(section.id, { wordCountTarget: parseInt(v) || 1500, estimatedWordCount: parseInt(v) || 1500 })}
                                     className="text-[10px] font-bold text-amber-700 uppercase tracking-widest"
                                   />
                                   <span className="text-[10px] font-bold text-amber-700/40 uppercase tracking-widest">WORDS</span>
@@ -3264,7 +4455,7 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                             </div>
                           </div>
 
-                          {section.researchBrief && !section.narrative && mode === "narrate" && (
+                          {!section.narrative && mode === "narrate" && (
                             <button
                               onClick={() => handleNarrateSection(idx)}
                               disabled={narratingIndex !== null || narratorIsProcessing}
@@ -3551,7 +4742,7 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                   </div>
                   <div>
                     <h3 className="text-xl font-serif font-bold text-warm-ink">Rewrite Section</h3>
-                    <p className="text-xs text-warm-ink/40 uppercase tracking-widest font-black">Section {sections[sectionToRewriteIdx!]?.sectionNumber || (sectionToRewriteIdx! + 1)}</p>
+                    <p className="text-xs text-warm-ink/40 uppercase tracking-widest font-black">Section {activeSections[sectionToRewriteIdx!]?.sectionNumber || (sectionToRewriteIdx! + 1)}</p>
                   </div>
                 </div>
                 <button 
