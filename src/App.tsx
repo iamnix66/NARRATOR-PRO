@@ -1047,7 +1047,14 @@ Let's return a JSON matching this exact schema:
     }
   };
 
-  const handlePlanOutline = async (researchedSections: NarrativeSection[]) => {
+  const handleSkipSuspenseAndPlan = async () => {
+    setSelectedSuspenseOptionId(null);
+    setCustomSuspenseBrief("");
+    setSuspenseDeclaration(null);
+    await handlePlanOutline(sections, true);
+  };
+
+  const handlePlanOutline = async (researchedSections: NarrativeSection[], skipSuspenseOverride = false) => {
     setNarratorIsProcessing(true);
     setError(null);
 
@@ -1057,7 +1064,7 @@ Let's return a JSON matching this exact schema:
       let prompt = "";
       let sysInst = OUTLINE_PLANNING_PROTOCOL;
 
-      const selectedOption = suspenseOptions.find(o => o.id === selectedSuspenseOptionId);
+      const selectedOption = skipSuspenseOverride ? null : suspenseOptions.find(o => o.id === selectedSuspenseOptionId);
       const suspenseStrategyContext = selectedOption ? `
 CRITICAL AGREED NARRATIVE SUSPENSE STRATEGY:
 - Title: ${selectedOption.title}
@@ -1087,7 +1094,7 @@ In this planning phase, write an extensive report answering and discussing each 
 3. CHRONOLOGICAL MATRIX & STORY FLOW: Outline the exact narrative flow from the disruption to the climax and resolution. How will we divide the timeline chronologically across these sections? You are STRICTLY FORBIDDEN from planning or creating a separate, dedicated chapter or section for court/trial/sentencing. Fold the final outcome (how they were dealt with, went to prison, died) directly into the last 2 or 3 bullets of the final section as direct chronological history.
 4. EVENT LEVEL PLANNING (AT LEAST 10 EVENTS PER SECTION, NO UPPER CAP): Discuss the key sequential events we will write into each section. Explain how we will compile at least 10 highly rich, detailed, distinct chronological occurrences per section, scaling higher if the section's historical complexity demands it, providing high-fidelity fact density with absolutely no rigid caps. Every planned bullet MUST group multiple related sequential physical developments in progress (what happened, and then what happened next). Ensure our planned bullets are never single-action placeholders padded with explanations or weather.
 5. REASONABLE WORD COUNT TARGET: For each section, discuss and specify a reasonable, sincere word count target (e.g., 3,000 to 5,000 words per section) that matches the extreme event density. Ensure we do not resort to padding, commentary, significance, or atmospheric scenery to hit this; word count must be driven entirely by sequential fact planning.
-6. OMNISCIENT PERSPECTIVE & BIAS FILTER (ZERO CELL-PING & ZERO-COURT/TRIAL CONSTRAINTS): Explain how we will ensure a 100% omniscient perspective. Identify and completely purge any default detective-focused, court/trial-focused, cell tower trace, minute-by-minute mechanical micro-action, or list redundant habits. You are strictly forbidden from mentioning, proposing, or using words like "court", "trial", "prosecution", "defense", "charged", "placed in court", "hearings", or similar. Any cell phone records, tower ping maps, or tracker operations are also 100% forbidden; plan to narrate phone calls and actions direct from history. We will have absolutely zero courtroom presence or trial scenes.
+6. OMNISCIENT PERSPECTIVE & BIAS FILTER (ZERO CELL-PING & ZERO-COURTROOM-DRAMA CONSTRAINTS): Explain how we will ensure a 100% omniscient perspective. Identify and completely purge any default detective-focused, court/trial-focused, cell tower trace, minute-by-minute mechanical micro-action, or list redundant habits. You are strictly forbidden from writing or planning active courtroom scenes, legal arguments, or trial proceedings. However, standard character titles/descriptors like "attorney" or "lawyer", and simple final historical outcomes like "sentenced to thirty years in prison" or "guilty" folded into the final closing bullets are 100% acceptable. Any cell phone records, tower ping maps, or tracker operations are also 100% forbidden; plan to narrate phone calls and actions direct from history. We will have absolutely zero active courtroom presence or trial scenes.
 7. HOW WE PREVENT CORE PROTOCOL VIOLATIONS: Discuss how we will maintain strict adherence to:
    - Say-it-once rule (no repetition across sections/bullets).
    - No foresight/foreshadowing.
@@ -1184,7 +1191,7 @@ ${RETELLING_PROTOCOL}
 TASK:
 Perform a rigorous verification and safety audit on the structural plan. Check for:
 1. THE STARTING POINT / POINT OF DISRUPTION: Does the starting plan fail to open exactly at the chronological Point of Disruption (where things first become clear there is a problem/catalyst that leads to the climax)? Does it begin with boring childhood, family ancestry, births, or general community description details instead? If so, flag it as a major starting point violation and mandate starting exactly at the Point of Disruption, while proposing alternative natural ways to weave crucial childhood background details into later sections contextually.
-2. INVESTIGATIVE DETECTIVE, COURTROOM & CELL-PING VIOLATIONS: Is there any risk that the events in any section will be narrated through the eyes of the police, courts, or witness reports instead of real-time omniscient action? Avoid words like "court", "trial", "prosecution", "defense", "charged", "placed in court", "hearings". Does the plan propose any dedicated or independent section for court, trial, sentencing, or aftermath? If so, flag it as a critical violation and direct that it be merged and the court section removed entirely, with only a 2-3 bullet outcome at the very end. Are there any plans to mention retroactive cell phone signal mapping or cellular tower pings? Flag cell records tracking as 100% banned.
+2. INVESTIGATIVE DETECTIVE, COURTROOM & CELL-PING VIOLATIONS: Is there any risk that the events in any section will be narrated through the eyes of the police, courts, or witness reports instead of real-time omniscient action? We want to avoid active courtroom scenes and trial play-by-plays. Do NOT flag character professions/nouns like "attorney", "lawyer", or "prosecutor", and do NOT flag standard final sentencing/justice terms (e.g. "sentenced to life imprisonment", "guilty") folded into the final bullets of the closing section. Does the plan propose any dedicated or independent section for court or trial? If so, flag it as a critical violation and direct that it be merged/removed, with only a 2-3 bullet outcome at the very end. Are there any plans to mention retroactive cell phone signal mapping or cellular tower pings? Flag cell records tracking as 100% banned.
 3. OUTLINE PROPORTION & DEPTH: Does the plan fully guarantee that the number of sections matches the complexity of the case (with no rigid upper caps on sections), and that each section will contain at least 10 highly rich, distinct chronological events, with no artificial upper limits or rigid rules capping them if the history contains more details? Are there any shallow portions?
 4. NARRATIVE REPETITION RISK (Say-it-once): Do any planned events overlap across sections or repeat facts?
 5. TEMPORAL LEAPS & FLASHBACKS: Are any flashbacks or premonitions planned that break the chronological forward-moving time flow?
@@ -1299,7 +1306,7 @@ CRITICAL HARD CONSTRAINTS:
 6. NO SENTENCE REDUNDANCY: Do not say the same thing in different words or write redundant sentences in the same bullet or section. Every single sentence must introduce a new, active chronological event or plot progression. 
 7. EVERY date and number MUST be written in full words (e.g., 'the tenth of october nineteen ninety six', 'five hundred thousand dollars', etc.). No digits allowed!
 8. TRUE BULLET DENSITY (NO SHALLOW OR DISGUISED BULLETS): Every bullet point/event in the JSON MUST contain a group of specific related events in chronological series. You are strictly forbidden from writing a single-action bullet (e.g., "he went to the bank") and then padding that bullet point with purpose explainers ("which allowed him to..."), editorial speech/commentary ("this marked the point of no return"), or atmospheric/environmental fillers ("the room was silent and cold"). A proper bullet is a multi-sentence chronological paragraph (at least 3-5 sentences long, around 60 to 120 words) containing a series of sequential events or actions (what happened, and then what happened next).
-9. ZERO COURT OR TRIAL TERM PRESENCE (100% FORBIDDEN IN ALL BULLETS): You are strictly forbidden from creating a dedicated or separate section, or writing any bullet points, containing words or details relating to courts, trials, jury selection, judges, lawyers, prosecutors, legal hearings, indictments, charges, or legal testimonies. Banish all trial drama and courtroom vocabulary (such as 'charged', 'placed in court', 'prosecutor', 'defense case') entirely. The final outcome of how the characters were dealt with (e.g. went to prison, died, what happened to them) must be written purely as direct chronological historical facts folded exclusively into the last 2 or 3 bullet points of the final section. The story concludes there.
+9. ZERO COURT OR TRIAL SCENE DRAMA (NO ACTIVE COURTROOM FIGHTS): You are strictly forbidden from creating a dedicated or separate section, or writing any bullet points, containing active courtroom debates, lawyer speeches, jury selections, witness courtroom testimonies, or legal hearings. Banish active courtroom drama entirely. However, you are 100% permitted to use standard character titles or professions to identify characters (e.g., "attorney", "lawyer", "defense attorney", "prosecutor") and report the direct, factual outcome (verdict or sentence) fold-out. Simple direct finality terms folded into the final closing 2 or 3 bullet points of the final section (e.g. "sentenced to life imprisonment", "sentenced to thirty years in a state prison Block", "guilty", "convicted") are completely acceptable and MUST NOT be flagged. Describe the physical, real-world historical results of how characters were dealt with plainly.
 11. STRICTOR CORE COMPLIANCE WITH FORENSIC AUDIT: You must review the FORENSIC INTEGRITY AUDIT report closely and actively correct every single violation flagged. You are strictly forbidden from ignoring the audit's findings or repeating the flagged errors in the final outline. All identified violations must be fully resolved.
 ${suspenseReconstructionRules}
 
@@ -1806,7 +1813,7 @@ YOUR OUTPUT MUST EXACTLY MATCH THIS JSON SCHEMA:
         - NEVER summarize. Do not skip or speed through any events. Ensure the narrative flows continuously.
         
         CRITICAL RECONSTRUCTION PROTOCOLS (VIOLATION PREVENTIONS):
-        1. ZERO COURT OR TRIAL SCENES: You are strictly forbidden from writing about courtroom proceedings, judges, juries, legal defense, prosecution, trials, legal testimonies, depositions, or legal sentencing. Fold any final justice outcomes solely and direct as a simple chronological result at the very end.
+        1. ZERO COURTROOM OR ACTIVE TRIAL DRAMA SCENES: You are strictly forbidden from writing about active courtroom proceedings, lawyer debates, legal arguments, jury selections, witness courtroom testimonies, or legal depositions. However, standard character titles/professions (e.g., "attorney", "lawyer", "defense attorney", "prosecutor") and direct, simple final justice outcomes (e.g., "sentenced to life imprisonment", "guilty", "sentenced to thirty years in prison") folded only as direct chronological results at the very end are 100% permitted.
         2. ZERO PHONE RECORD INTERRUPTIONS / CELL TOWERS: Do not write about investigators checking cell phone mapping, cell tower pings, pulling phone records, or technical mobile location tracking. Describe what calls were made and character movements purely as direct, real-time actions of the characters.
         3. FOCUS ON THE HEART OF THE STORY: Focus entirely on the characters' motivations, relationship dynamics, actions, and the emotional/physical developments of the events. Avoid dry technical descriptions, machine weights, or clinical statistics.
         4. PERFECT FULL-WORD DATES: Every single date, year, caliber, room number, and currency MUST be spelled out completely in words (e.g. "the fifth of March, nineteen ninety six", "eighty thousand dollars"). Never use numeric digits.
@@ -1974,7 +1981,7 @@ YOUR OUTPUT MUST EXACTLY MATCH THIS JSON SCHEMA:
         TOTAL DISRUPTION MANDATE: You MUST destroy the original sentence and structure. If you just swap words, you have failed. Maintain the exact sequence of events as they appear in the original text but use simple spoken words.
 
         CRITICAL RECONSTRUCTION PROTOCOLS (VIOLATION PREVENTIONS):
-        1. ZERO COURT OR TRIAL SCENES: You are strictly forbidden from writing about courtroom proceedings, judges, juries, legal defense, prosecution, trials, legal testimonies, depositions, or legal sentencing. Fold any final justice outcomes solely and direct as a simple chronological result at the very end.
+        1. ZERO COURTROOM OR ACTIVE TRIAL DRAMA SCENES: You are strictly forbidden from writing about active courtroom proceedings, lawyer debates, legal arguments, jury selections, witness courtroom testimonies, or legal depositions. However, standard character titles/professions (e.g., "attorney", "lawyer", "defense attorney", "prosecutor") and direct, simple final justice outcomes (e.g., "sentenced to life imprisonment", "guilty", "sentenced to thirty years in prison") folded only as direct chronological results at the very end are 100% permitted.
         2. ZERO PHONE RECORD INTERRUPTIONS / CELL TOWERS: Do not write about investigators checking cell phone mapping, cell tower pings, pulling phone records, or technical mobile location tracking. Describe what calls were made and character movements purely as direct, real-time actions of the characters.
         3. FOCUS ON THE HEART OF THE STORY: Focus entirely on the characters' motivations, relationship dynamics, actions, and the emotional/physical developments of the events. Avoid dry technical descriptions, machine weights, or clinical statistics.
         4. PERFECT FULL-WORD DATES: Every single date, year, caliber, room number, and currency MUST be spelled out completely in words. Never use numeric digits.
@@ -3655,10 +3662,12 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                           </div>
                         </button>
                         <button
-                          onClick={goForward}
-                          className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline cursor-pointer"
+                          onClick={handleSkipSuspenseAndPlan}
+                          disabled={narratorIsProcessing}
+                          className="text-xs font-bold uppercase tracking-widest text-emerald-650 disabled:text-neutral-400 text-center py-2 hover:underline cursor-pointer flex items-center justify-center gap-2"
                         >
-                          Skip to Suspense Detection Page →
+                          {narratorIsProcessing ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+                          Skip Suspense Phase & Run Forensic Planning (Direct Chronological) →
                         </button>
                       </div>
                     )}
@@ -3812,6 +3821,14 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                               <span className="block text-sm uppercase tracking-widest font-black">Step 4: Proceed to Forensic Planning</span>
                               <span className="block text-xs font-normal opacity-90">Inject chosen suspense pattern rules and facts to draft the structured blueprint.</span>
                             </div>
+                          </button>
+                          <button
+                            onClick={handleSkipSuspenseAndPlan}
+                            disabled={narratorIsProcessing}
+                            className="text-xs font-bold uppercase tracking-widest text-emerald-650 disabled:text-neutral-400 text-center py-2 hover:underline cursor-pointer flex items-center justify-center gap-2"
+                          >
+                            {narratorIsProcessing ? <Loader2 className="w-3 h-3 animate-spin" /> : null}
+                            Skip Suspense Phase & Run Forensic Planning (Direct Chronological) →
                           </button>
                         </div>
                       </div>
