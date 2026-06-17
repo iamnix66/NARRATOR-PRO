@@ -26,6 +26,26 @@ WHY IT'S RIGHT: Full sentences. Complete meaning. Every phrase tells you somethi
 Short sentences are allowed and sometimes effective, but ONLY when they carry a complete thought that makes total sense on its own. "He was dead." makes complete sense. "Human anatomy." does not.
 
 ────────────────────────────────────────
+SECTION 1.5: SENTENCE FLOW, RELATED ACTIONS, AND CONNECTORS (NO CHOPPY SENTENCES)
+────────────────────────────────────────
+
+You MUST connect sentences that are logically, chronologically, or action-wise related. You are strictly forbidden from writing choppy, staccato, isolated sentences that feel separated, robotic, and disconnected. Stop being in a hurry to use full stops! Use natural connectors (like "and", "then", "after that", "so", "but then") to join related thoughts and let the narration flow like a real spoken story.
+
+1. CONNECTING RELATED ACTIONS:
+Do NOT write multiple separate short sentences describing related sequential movements or actions. Merge them into a single flowing sentence that describes the progression.
+- WRONG: "He went to the bar. He bought some drinks. He finished drinking."
+- RIGHT: "He went to the bar and bought some drinks, then he finished drinking and left."
+- WRONG: "He went into the room. He took the money from the table. He went to the place."
+- RIGHT: "He went into the room and took the money from the table, and then after that, he left."
+
+2. CONNECTING SPEECH AND DIALOGUE DISCLOSURES:
+Do NOT repeatedly say "she said", "she told", "she specifically said" in isolated staccato sentences when someone is stating multiple related things. Use proper coordinating conjunctions, participles, or connectors so the actions connect and do not feel isolated.
+- WRONG: "She told him that she went to the family house. She said she will come later. She mentioned that she would be late."
+- RIGHT: "She told him that she went to the family house and would come later, adding that she would be late for that night."
+
+Follow this rule in BOTH the NARRATE MODE and the OUTLINE CONSTRUCTION. Keeping the narrative flowing, interconnected, and natural is a mandatory directive.
+
+────────────────────────────────────────
 SECTION 2: THE REAL PROBLEM — REGISTER, NOT LENGTH
 ────────────────────────────────────────
 
@@ -78,7 +98,9 @@ Written language builds up detailed imagery with adjectives and trivial details.
 - Stop searching for or forcing tiny, microscopic, non-essential details in both the outline and the narrative. 
 - NO CAR MAKE/MODEL/YEAR: Unless the exact make, model, or year of a private vehicle is the central clue in solving the entire crime, you are strictly forbidden from specifying it. Simply say "his car", "the truck", or "the vehicle". 
 - NO NON-ESSENTIAL STREET NAMES OR ADDRESSES: Do not specify street numbers (e.g., "five zero four"), non-critical street names (e.g., "West Avenue"), or exact addresses if they do not directly impact what happens next. Say "the street" or "the avenue".
-- NO MUNDANE TRANSITIONAL ELABORATIONS: Do not detail how people got into cars, how long they sat there, or how they walked down specific roads unless those actions contain a major plot development. Keep actions on a simple, direct plot-beat level (e.g., "He got into his car and drove away" or "He walked down the street and went inside").
+- NO MUNDANE TRANSITIONAL ELABORATIONS OR ARREST OVER-DETAIL:
+  - Do not detail how people got into cars, how long they sat there, or how they walked down specific roads unless those actions contain a major plot development. Keep actions on a simple, direct plot-beat level (e.g., "He got into his car and drove away" or "He walked down the street and went inside").
+  - Do NOT describe the microscopic mechanical actions of an arrest. Banned are descriptions such as: "the police went to him, put him on the ground, tied his hands with rope, put him in the back of the patrol car, and took him to the station." That is useless mechanical fluff. Go straight to the point: say that the police arrested him and took him to prison/the station, and keep the story moving forward! Avoid staying in one place saying the same thing in different ways.
 
 WRONG: "creating a permanent, testable timeline of his exposure in his extremities"
 RIGHT: "leaving a permanent record of his exposure in his hair and nails that could be tested"
@@ -167,7 +189,7 @@ It is not enough to change the words. You must also change the skeleton of each 
 BANNED: Same-bone flipping. (e.g., Taking "John walked into the room angrily" and writing "Angrily, John entered the room" is FORBIDDEN).
 BANNED: Paragraph shuffling. Rearranging the original sentences in a slightly different order is FORBIDDEN. You MUST maintain the original sequence of events as they appear in the original text.
 NO CLIFFHANGERS OR RECAPS: Do not end a section with a cliffhanger. Do not start a section with a recap.
-MAINTAIN SUSPENSE: Withhold key information strategically to keep the viewer guessing, but always maintain a strict chronological flow without foreshadowing.
+MAINTAIN SUSPENSE: Withhold key information strategically to keep the viewer guessing. Non-linear progressions, flashbacks, or structural leaps are fully permitted and can enhance suspense when needed or requested.
 
 CAPABILITY CREDENTIAL DEFERRAL RULE: If a character performs an action that demonstrates a specialized skill (surgery, anatomy, hacking, forgery), do NOT front-load the credential that explains the capability in the same sentence or paragraph. State the action. The credential (education, training, prior role) may appear only subsequently as a brief parenthetical or late revelation — never as a setup for the action. The action demonstrates the skill; the credential confirms it afterward.
 
@@ -195,18 +217,16 @@ BANNED EXAMPLES:
 - "utilized" -> "used"
 - "equestrian" -> "horse rider"
 
-THE "KITCHEN TABLE" REGISTER (ABSOLUTE BAN ON THESE WORDS):
-If you are using these words, you are failing. Use the spoken alternatives:
+THE "KITCHEN TABLE" REGISTER (ABSOLUTE BAN ON COMPLEX OBTUSE JARGON):
+If you are using these words, you are failing. Use the spoken alternatives. NOTE: Common, standard terms like "life imprisonment", "bail", "parole", "possibility of parole", "consecutive sentences", "concurrent sentences", "jury", "trial", "verdict", "sentenced to prison" are COMPLETELY ALLOWED and encouraged. Do NOT ban or replace these common terms.
 - "tenement building" -> "run-down apartment block" or "crowded rental building"
 - "testamentary fraud" -> "will forgery" or "forging a will" or "stealing because of a fake will"
 - "hostile legal takeover" -> "taking of everything using forged documents" or "stealing everything with fake papers"
 - "primary beneficiary" -> "the person who gets all the money or property"
 - "formally mandated" -> "ordered" or "officially instructed"
 - "disinherits" (as a verb layout) -> "creates a fake document leaving them nothing" or "leaves them completely out"
-- "permanent incarceration" -> "sent to prison for the rest of his life" or "locked up forever"
+- "permanent incarceration" -> "life imprisonment" or "sentenced to prison for life"
 - "minimum tariff" -> "the shortest time they had to stay locked up" or "the exact years she had to serve before she could ask to leave"
-- "possibility of parole" -> "any chance of getting let out early" or "the opportunity to go free early"
-- "consecutive sentences" -> "one sentence starting right after another" or "extra years added to the end of the first punishment"
 - "industrial neighborhood" -> "factory area" or "part of town where the factories were"
 - "synchronized shoulder rams" -> "they lined up and hit the door with their shoulders at the exact same time"
 - "locking mechanism" -> "the lock"
@@ -236,8 +256,9 @@ WHEN THERE ARE ORIGINAL QUOTES IN THE ORIGINAL OUTLINE, ADD THEM VERBATIM IN YOU
 SECTION 7: NAMES, NUMBERS, TERMS
 ────────────────────────────────────────
 
-NO ABBREVIATIONS FOR NAMES:
+NO ABBREVIATIONS FOR NAMES (AND NO REPETITIVE FULL NAMES):
 Do NOT use abbreviations like "S.A Williams" or "P.O Smith." Use the first name, the last name, or the full name. If you have the person's name, use it naturally.
+STOP REPETITIVE FULL NAMES: If you mention a person's full name once to introduce them (e.g., "John Smith"), you are STRICTLY FORBIDDEN from repeatedly using their full name throughout the narrative. Always speaking using full names sounds extremely robotic, awkward, and artificial. After introducing them, refer to them only by their first name ("John") or use appropriate pronouns ("he", "him", "his", "she", "her") so that the narration is smooth, easy to listen to, and flows like real spoken story.
 
 NO UNNECESSARY PRECISE DETAILS:
 Do not waste the audience's time on details that don't matter.

@@ -7,7 +7,7 @@ import { GoogleGenAI, Content, HarmCategory, HarmBlockThreshold, Type } from "@g
 import mammoth from "mammoth";
 import confetti from "canvas-confetti";
 import { AnimatePresence, motion } from "motion/react";
-import { Copy, History, Loader2, RotateCcw, Sparkles, Wand2, PlusCircle, Import, X, Trash2, RefreshCcw, ChevronLeft, ChevronRight, BookOpen, PenTool, Search, LayoutList, FileText, CheckCircle2, ChevronDown, ChevronUp, Clock, PlayCircle, ListChecks, AlertCircle, Download, Save, Edit3, Eye, MessageSquare } from "lucide-react";
+import { Copy, History, Loader2, RotateCcw, Sparkles, Wand2, PlusCircle, Import, X, Trash2, RefreshCcw, ChevronLeft, ChevronRight, BookOpen, PenTool, Search, LayoutList, FileText, CheckCircle2, ChevronDown, ChevronUp, Clock, PlayCircle, ListChecks, AlertCircle, Download, Save, Edit3, Eye, MessageSquare, Check, FolderOpen } from "lucide-react";
 import { useState, useCallback, useRef, useEffect } from "react";
 import Markdown from "react-markdown";
 import { saveAs } from 'file-saver';
@@ -84,6 +84,16 @@ interface OutlineViolation {
   explanation: string;
   originalBulletText: string;
   correctedBulletText: string;
+}
+
+interface DetectedGap {
+  id: string;
+  sectionNumber: number;
+  targetBulletIndex?: number;
+  gapDescription: string;
+  chronologicalPosition: string;
+  howToApply: "existing" | "new";
+  proposedCorrection: string;
 }
 
 
@@ -174,8 +184,57 @@ function getNormalizedEvents(section: NarrativeSection): string[] {
   return [];
 }
 
+const extractTitleFromText = (text: string): string => {
+  if (!text) return "";
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+  if (lines.length === 0) return "";
+  
+  // Look at the first line
+  let firstLine = lines[0];
+  
+  // Clean markdown or decorative headers
+  firstLine = firstLine
+    .replace(/^(#+\s*)+/, "")             // Remove markdown headers #, ##
+    .replace(/^([*_\-~+=]{3,})\s*/, "")  // Remove divider accents like *** or === at start
+    .replace(/\s*([*_\-~+=]{3,})$/, "")  // Remove divider accents at end
+    .replace(/^title:\s*/i, "")          // Remove "title:" prefix
+    .replace(/^case:\s*/i, "")           // Remove "case:" prefix
+    .replace(/^topic:\s*/i, "")          // Remove "topic:" prefix
+    .trim();
+    
+  if (firstLine.length > 0 && firstLine.length < 80) {
+    return firstLine;
+  }
+  
+  // If the first line is too long, check the next few lines for explicit headers
+  for (let i = 1; i < Math.min(3, lines.length); i++) {
+    let line = lines[i];
+    if (line.startsWith("#") || line.toLowerCase().startsWith("title:") || line.toLowerCase().startsWith("case:")) {
+      return line
+        .replace(/^(#+\s*)+/, "")
+        .replace(/^title:\s*/i, "")
+        .replace(/^case:\s*/i, "")
+        .trim();
+    }
+  }
+  
+  // Fallback to a slice of the first line
+  return firstLine.substring(0, 50) + (firstLine.length > 50 ? "..." : "");
+};
+
 export default function App() {
   const [mode, setMode] = useState<AppMode>("retell");
+  
+  const [caseTitle, setCaseTitle] = useState<string>("");
+  const [isEditingCaseTitle, setIsEditingCaseTitle] = useState(false);
+  const [tempCaseTitle, setTempCaseTitle] = useState("");
+
+  const handleSaveCaseTitle = () => {
+    if (tempCaseTitle.trim()) {
+      setCaseTitle(tempCaseTitle.trim());
+    }
+    setIsEditingCaseTitle(false);
+  };
   
   // Reteller State
   const [inputText, setInputText] = useState("");
@@ -203,7 +262,12 @@ export default function App() {
   const [checkedViolationIds, setCheckedViolationIds] = useState<string[]>([]);
   const [suspenseDeclaration, setSuspenseDeclaration] = useState<SuspenseDeclaration | null>(null);
   const [narratorIsProcessing, setNarratorIsProcessing] = useState(false);
-  const [currentNarratorStep, setCurrentNarratorStep] = useState<"idle" | "parsed" | "researched" | "suspensed" | "planned" | "detected" | "narrating" | "refined" | "doublechecked" | "corrected">("idle");
+  const [currentNarratorStep, setCurrentNarratorStep] = useState<"idle" | "parsed" | "researched" | "suspensed" | "planned" | "detected" | "gaps" | "narrating" | "refined" | "doublechecked" | "corrected">("idle");
+
+  // Gap Detection State Variables
+  const [detectedGaps, setDetectedGaps] = useState<DetectedGap[]>([]);
+  const [checkedGapIds, setCheckedGapIds] = useState<string[]>([]);
+  const [gapsReport, setGapsReport] = useState("");
 
   // Suspense Detection State Variables
   const [suspenseOptions, setSuspenseOptions] = useState<ProposedSuspenseOption[]>([]);
@@ -215,6 +279,10 @@ export default function App() {
   // Custom Correction State Variables
   const [customCorrectionUserText, setCustomCorrectionUserText] = useState("");
   const [customCorrectionDialogue, setCustomCorrectionDialogue] = useState<Content[]>([]);
+
+  // Planning Interactive State Variables
+  const [planningDialogue, setPlanningDialogue] = useState<Content[]>([]);
+  const [planningUserText, setPlanningUserText] = useState("");
 
   const activeSections = (selectedOutlineType === "uncorrected" && uncorrectedSections.length > 0 && (currentNarratorStep === "corrected" || currentNarratorStep === "narrating")) ? uncorrectedSections : sections;
 
@@ -243,6 +311,9 @@ export default function App() {
   const [narratingIndex, setNarratingIndex] = useState<number | null>(null);
   const [researchingIndex, setResearchingIndex] = useState<number | null>(null);
   const [collapsedResearch, setCollapsedResearch] = useState<Record<string, boolean>>({});
+  const [sectionResearchUploading, setSectionResearchUploading] = useState<Record<string, boolean>>({});
+  const [isCollectingBlueprint, setIsCollectingBlueprint] = useState(false);
+  const [scratchBlueprintText, setScratchBlueprintText] = useState("");
   
   // Rewrite Feature State
   const [isRewriteModalOpen, setIsRewriteModalOpen] = useState(false);
@@ -258,7 +329,7 @@ export default function App() {
 
   const [isNarratingAll, setIsNarratingAll] = useState(false);
 
-  const steps = ["idle", "parsed", "researched", "suspensed", "planned", "detected", "refined", "doublechecked", "corrected"];
+  const steps = ["idle", "parsed", "researched", "suspensed", "planned", "detected", "gaps", "refined", "doublechecked", "corrected"];
 
   const resultRef = useRef<HTMLDivElement>(null);
   const suspenseTextareaRef = useRef<HTMLTextAreaElement>(null);
@@ -327,7 +398,10 @@ export default function App() {
           suspenseDialogue: savedSuspenseDialogue,
           customSuspenseBrief: savedCustomSuspenseBrief,
           customCorrectionDialogue: savedCustomCorrectionDialogue,
-          customCorrectionUserText: savedCustomCorrectionUserText
+          customCorrectionUserText: savedCustomCorrectionUserText,
+          planningDialogue: savedPlanningDialogue,
+          planningUserText: savedPlanningUserText,
+          caseTitle: savedCaseTitle
         } = JSON.parse(savedNarrate);
         if (savedSections) setSections(savedSections);
         if (savedUncorrected) setUncorrectedSections(savedUncorrected);
@@ -354,6 +428,13 @@ export default function App() {
         if (savedCustomSuspenseBrief) setCustomSuspenseBrief(savedCustomSuspenseBrief);
         if (savedCustomCorrectionDialogue) setCustomCorrectionDialogue(savedCustomCorrectionDialogue);
         if (savedCustomCorrectionUserText) setCustomCorrectionUserText(savedCustomCorrectionUserText);
+        if (savedPlanningDialogue) setPlanningDialogue(savedPlanningDialogue);
+        if (savedPlanningUserText) setPlanningUserText(savedPlanningUserText);
+        if (savedCaseTitle) {
+          setCaseTitle(savedCaseTitle);
+        } else if (savedSections && savedSections.length > 0) {
+          setCaseTitle(savedSections[0].title || "Active Case");
+        }
       } catch (e) { console.error(e); }
     }
   }, []);
@@ -392,9 +473,12 @@ export default function App() {
       suspenseDialogue,
       customSuspenseBrief,
       customCorrectionDialogue,
-      customCorrectionUserText
+      customCorrectionUserText,
+      planningDialogue,
+      planningUserText,
+      caseTitle
     }));
-  }, [sections, uncorrectedSections, selectedOutlineType, currentNarratorStep, narratorChatHistory, mode, outlinePlan, suspenseDeclaration, violationsAudit, reconstructedOutlineViolationsReport, outlineSource, maxReachedStep, outlinerStrategy, userResearchText, userResearchFileName, userResearchSource, scratchResearchDossier, outlineViolations, checkedViolationIds, suspenseOptions, selectedSuspenseOptionId, suspenseDialogue, customSuspenseBrief, customCorrectionDialogue, customCorrectionUserText]);
+  }, [sections, uncorrectedSections, selectedOutlineType, currentNarratorStep, narratorChatHistory, mode, outlinePlan, suspenseDeclaration, violationsAudit, reconstructedOutlineViolationsReport, outlineSource, maxReachedStep, outlinerStrategy, userResearchText, userResearchFileName, userResearchSource, scratchResearchDossier, outlineViolations, checkedViolationIds, suspenseOptions, selectedSuspenseOptionId, suspenseDialogue, customSuspenseBrief, customCorrectionDialogue, customCorrectionUserText, planningDialogue, planningUserText, caseTitle]);
 
   // Auto-heal "THE SUITCASE KILLER" to remove the redundant reconstruction phase
   useEffect(() => {
@@ -420,8 +504,8 @@ export default function App() {
               "On the morning of the twenty-eighth of April, at eight thirty-two, Melanie stops at a Walgreens pharmacy in Edison, New Jersey, to pick up a potent liquid sedative. She presents a forged prescription written on Reproductive Medicine Associates stationery under the name of an actual client who has no knowledge of the transaction. The prescription specifies chloral hydrate, a fast-acting compound that is rarely used but highly effective at inducing heavy coma. The handwriting on the slip matches Melanie's, and the pharmacist packages the bottle and syringes without question, allowing her to depart in time for a major residential transaction later that day.",
               "Later that afternoon, Bill and Melanie McGuire meet their real estate agent in Warren County to finalize the purchase of their five-hundred-thousand-dollar home. They sit across the table, signing the detailed closing documents for a house that represents outward traditional success and a path of domestic advancement. To anyone watching, they appear to be a striving young couple investing in their children's future, but the ledger is already settled. Bill behaves with his usual volatile confidence, unaware that his wife has a forged sedative and an unregistered Easton revolver sitting in her possessions.",
               "That evening, back in their Woodbridge apartment, Bill and Melanie consume their dinner, and Melanie quietens her husband by adding the liquid chloral hydrate to his glass. The sedative works quickly, overriding his six-foot frame and reducing him to a state of complete, heavy unconsciousness on the living room floor. With the children asleep, Melanie retrieves the thirty-eight-caliber revolver from its hiding place and fires two muffled rounds directly into her husband's body. One projectile tears through his skull and the other pierces his chest, ending his life in their living room.",
-              "Melanie moves her husband's large form to the apartment bathroom, sealing the area to contain the immediate physical debris. She utilizes a reciprocating saw with an electrical motor and demolition blades to divide the body at the joints, working methodically through the night. The saw produces a fine biological sawdust that settles into the tile grout and the floor seams, which will later leave microscopic traces behind. She works with sustained control, showing none of the panic that often characterizes spontaneous crimes.",
-              "Once the physical division is complete, Melanie wraps the remains in multiple layers of clinical-grade clear plastic sheets obtained from her office supply lockers at Reproductive Medicine Associates. She seals the plastic packages using heavy surgical tape, trapping shaver stubble and biological particles in the adhesive layers. She packs the wrapped parts into three dark green Kenneth Cole suitcases, which compose a matched designer luggage set the couple owned. The heavy weight of each bag requires extensive physical effort to shift for her five-foot-three frame.",
+              "Melanie moves her husband's large form to the apartment bathroom, sealing the area to contain the immediate debris. She utilizes a reciprocating saw with an electrical motor and demolition blades to divide the body at the joints, working methodically through the night. The saw produces a fine biological sawdust that settles into the tile grout and the floor seams, which will later leave microscopic traces behind. She works with sustained control, showing none of the panic that often characterizes spontaneous crimes.",
+              "Once the division is complete, Melanie wraps the remains in multiple layers of clinical-grade clear plastic sheets obtained from her office supply lockers at Reproductive Medicine Associates. She seals the plastic packages using heavy surgical tape, trapping shaver stubble and biological particles in the adhesive layers. She packs the wrapped parts into three dark green Kenneth Cole suitcases, which compose a matched designer luggage set the couple owned. The heavy weight of each bag requires extensive effort to shift for her five-foot-three frame.",
               "In the dark early hours of the thirtieth of April, Melanie drives Bill's car down the Garden State Parkway to Atlantic City to plant a false trail of gambler abandonment. She parks the vehicle in an employee lot behind the Flamingo Motel, leaving the keys inside to simulate a sudden, desperate flight. Grainy surveillance cameras capture a dark figure stepping out of the car at twelve forty in the morning and walking away. A separate vehicle, driven by an accomplice or Melanie herself, moves near the entrance briefly before the lot goes quiet once more.",
               "On the morning of the thirtieth of April, Melanie goes to the Middlesex County courthouse to petition for a restraining order against her missing husband. She recounts the night of their fight, detailing arguments about domestic laundry, and tells the judge she fears Bill's volatile temper. She explicitly states she does not know his current whereabouts, pretending he ran off to Atlantic City after striking her. The judge grants the order, and Melanie files for divorce immediately afterward, creating a legal buffer to shield her family assets."
             ],
@@ -432,8 +516,8 @@ export default function App() {
               "On the morning of the twenty-eighth of April, at eight thirty-two, Melanie stops at a Walgreens pharmacy in Edison, New Jersey, to pick up a potent liquid sedative. She presents a forged prescription written on Reproductive Medicine Associates stationery under the name of an actual client who has no knowledge of the transaction. The prescription specifies chloral hydrate, a fast-acting compound that is rarely used but highly effective at inducing heavy coma. The handwriting on the slip matches Melanie's, and the pharmacist packages the bottle and syringes without question, allowing her to depart in time for a major residential transaction later that day.",
               "Later that afternoon, Bill and Melanie McGuire meet their real estate agent in Warren County to finalize the purchase of their five-hundred-thousand-dollar home. They sit across the table, signing the detailed closing documents for a house that represents outward traditional success and a path of domestic advancement. To anyone watching, they appear to be a striving young couple investing in their children's future, but the ledger is already settled. Bill behaves with his usual volatile confidence, unaware that his wife has a forged sedative and an unregistered Easton revolver sitting in her possessions.",
               "That evening, back in their Woodbridge apartment, Bill and Melanie consume their dinner, and Melanie quietens her husband by adding the liquid chloral hydrate to his glass. The sedative works quickly, overriding his six-foot frame and reducing him to a state of complete, heavy unconsciousness on the living room floor. With the children asleep, Melanie retrieves the thirty-eight-caliber revolver from its hiding place and fires two muffled rounds directly into her husband's body. One projectile tears through his skull and the other pierces his chest, ending his life in their living room.",
-              "Melanie moves her husband's large form to the apartment bathroom, sealing the area to contain the immediate physical debris. She utilizes a reciprocating saw with an electrical motor and demolition blades to divide the body at the joints, working methodically through the night. The saw produces a fine biological sawdust that settles into the tile grout and the floor seams, which will later leave microscopic traces behind. She works with sustained control, showing none of the panic that often characterizes spontaneous crimes.",
-              "Once the physical division is complete, Melanie wraps the remains in multiple layers of clinical-grade clear plastic sheets obtained from her office supply lockers at Reproductive Medicine Associates. She seals the plastic packages using heavy surgical tape, trapping shaver stubble and biological particles in the adhesive layers. She packs the wrapped parts into three dark green Kenneth Cole suitcases, which compose a matched designer luggage set the couple owned. The heavy weight of each bag requires extensive physical effort to shift for her five-foot-three frame.",
+              "Melanie moves her husband's large form to the apartment bathroom, sealing the area to contain the immediate debris. She utilizes a reciprocating saw with an electrical motor and demolition blades to divide the body at the joints, working methodically through the night. The saw produces a fine biological sawdust that settles into the tile grout and the floor seams, which will later leave microscopic traces behind. She works with sustained control, showing none of the panic that often characterizes spontaneous crimes.",
+              "Once the division is complete, Melanie wraps the remains in multiple layers of clinical-grade clear plastic sheets obtained from her office supply lockers at Reproductive Medicine Associates. She seals the plastic packages using heavy surgical tape, trapping shaver stubble and biological particles in the adhesive layers. She packs the wrapped parts into three dark green Kenneth Cole suitcases, which compose a matched designer luggage set the couple owned. The heavy weight of each bag requires extensive effort to shift for her five-foot-three frame.",
               "In the dark early hours of the thirtieth of April, Melanie drives Bill's car down the Garden State Parkway to Atlantic City to plant a false trail of gambler abandonment. She parks the vehicle in an employee lot behind the Flamingo Motel, leaving the keys inside to simulate a sudden, desperate flight. Grainy surveillance cameras capture a dark figure stepping out of the car at twelve forty in the morning and walking away. A separate vehicle, driven by an accomplice or Melanie herself, moves near the entrance briefly before the lot goes quiet once more.",
               "On the morning of the thirtieth of April, Melanie goes to the Middlesex County courthouse to petition for a restraining order against her missing husband. She recounts the night of their fight, detailing arguments about domestic laundry, and tells the judge she fears Bill's volatile temper. She explicitly states she does not know his current whereabouts, pretending he ran off to Atlantic City after striking her. The judge grants the order, and Melanie files for divorce immediately afterward, creating a legal buffer to shield her family assets."
             ],
@@ -441,7 +525,7 @@ export default function App() {
               "Any courtroom or trial proceedings.",
               "Any detail of the state police investigation and finding of the toll records (belongs in Section 3)."
             ],
-            researchBrief: sections[0]?.researchBrief || "Bill McGuire and Melanie McGuire closing, the physical domestic escalating fight, the towing car in Atlantic City motel, suitcase discoveries near Chesapeake Bridge-tunnel.",
+            researchBrief: sections[0]?.researchBrief || "Bill McGuire and Melanie McGuire closing, the domestic escalating fight, the towing car in Atlantic City motel, suitcase discoveries near Chesapeake Bridge-tunnel.",
             narrative: ""
           },
           {
@@ -458,8 +542,8 @@ export default function App() {
               "On the evening of the fourth of May, Melanie loads the heavy Kenneth Cole suitcases into her own car and drives south on an overland disposal trip. She passes the Delaware state border, where her E-ZPass transponder registers a standard toll of ninety cents at an automated plaza. She continues south through Maryland and on to the long spans of the Chesapeake Bay Bridge-Tunnel at Virginia's eastern tip. At dark, quiet intervals along the bridge road, she lifts the heavy, dark green suitcases from her vehicle and drops them over the edge into the Atlantic waters below.",
               "On the morning of the fifth of May, two recreational fishermen in the Chesapeake Bay discover the first dark green suitcase floating near the pilings of the fourth artificial island. They haul the water-logged luggage onto their boat and notify local Virginia Beach police of the suspicious container. When investigators open the bag, they find heavy-duty clinic plastic sealed with thick tape, enclosing the lower legs of a male body. The clean cuts across the joints tell detectives this is the work of someone with anatomical knowledge and immense personal control.",
               "Ten days later, a biology student searching Fisherman's Island finds a second matching dark green suitcase cast up on the sand by the high tide. Virginia beach authorities recover the container, finding the upper torso and head of the male victim inside the clinical bags. The face is intact, bearing no signs of rapid decomposition under the local salt water. Forensic artists construct a detailed sketch of the man's features, and investigators begin circulating the likeness across the mid-Atlantic states in hope of public identification.",
-              "On the sixteenth of May, a boater walking a marshy creek near the bridge-tunnel spots the third Kenneth Cole suitcase floating in the shallows. This final bag contains the upper thighs and remaining torso sections, allowing the medical examiner to assemble a complete physical profile of the victim. Autopsy processing recovers two thirty-eight-caliber flat-nosed bullets, matching target ammunition styles from Easton gun stores. The examiner notes the extensive saw marks along the bone, confirming a slow, deliberate physical division after a dual-gunshot execution.",
-              "Within days of the forensic sketch's distribution, a physical therapist and close colleague of Bill McGuire recognizes his friend's features and contacts Jersey Shore police. Dental records and fingerprints verify that the dismembered remains belong to thirty-nine-year-old Bill, who has been missing since late April. New Jersey State Police absorb the homicide case, merging their investigation with local missing persons reports to track his final days. The scale of the crime captures massive public attention across several states.",
+              "On the sixteenth of May, a boater walking a marshy creek near the bridge-tunnel spots the third Kenneth Cole suitcase floating in the shallows. This final bag contains the upper thighs and remaining torso sections, allowing the medical examiner to assemble a complete profile of the victim. Autopsy processing recovers two thirty-eight-caliber flat-nosed bullets, matching target ammunition styles from Easton gun stores. The examiner notes the extensive saw marks along the bone, confirming a slow, deliberate division after a dual-gunshot execution.",
+              "Within days of the forensic sketch's distribution, a therapist and close colleague of Bill McGuire recognizes his friend's features and contacts Jersey Shore police. Dental records and fingerprints verify that the dismembered remains belong to thirty-nine-year-old Bill, who has been missing since late April. New Jersey State Police absorb the homicide case, merging their investigation with local missing persons reports to track his final days. The scale of the crime captures massive public attention across several states.",
               "Detectives examine Bill McGuire's background, uncovering a life shaped by major casino losses and unmonitored debts. His regular trips to Atlantic City's card tables and his volatile personality make him an ideal fit for an organized crime targeting profile. The detectives focus on the Flamingo Motel lot, where Bill's car was towed for parking violations after he disappeared. The prevailing theory among early investigators is a gangland execution, where a man owing large sums was liquidated by professional enforcers.",
               "Back in Woodbridge, Melanie McGuire hosts family members and maintains her role as a terrified, abandoned widow left to raise two toddlers alone. When detectives notify her of the positive identification, she collapses in sorrow, describing her husband's secret gaming debts and unpredictable flights. She urges them to seek answers in Atlantic City's betting circles, where Bill had regular dealings. Her public presentation is perfect, gaining the sympathy of coworkers and neighbors who help her manage the children and coordinate family arrangements.",
               "In late May, Melanie sends two typed anonymous letters to the attorney general's office to divert attention toward Bill's family. The letters claim that Bill's sister and a group of local associates had arranged the murder to capture real estate assets. She includes minor details, such as the location of Bill's ring, to make the accusations appear grounded in inside knowledge. Investigators process the text, finding the phrasing matches Melanie's writing style and contains details only the suspect would know.",
@@ -470,8 +554,8 @@ export default function App() {
               "On the evening of the fourth of May, Melanie loads the heavy Kenneth Cole suitcases into her own car and drives south on an overland disposal trip. She passes the Delaware state border, where her E-ZPass transponder registers a standard toll of ninety cents at an automated plaza. She continues south through Maryland and on to the long spans of the Chesapeake Bay Bridge-Tunnel at Virginia's eastern tip. At dark, quiet intervals along the bridge road, she lifts the heavy, dark green suitcases from her vehicle and drops them over the edge into the Atlantic waters below.",
               "On the morning of the fifth of May, two recreational fishermen in the Chesapeake Bay discover the first dark green suitcase floating near the pilings of the fourth artificial island. They haul the water-logged luggage onto their boat and notify local Virginia Beach police of the suspicious container. When investigators open the bag, they find heavy-duty clinic plastic sealed with thick tape, enclosing the lower legs of a male body. The clean cuts across the joints tell detectives this is the work of someone with anatomical knowledge and immense personal control.",
               "Ten days later, a biology student searching Fisherman's Island finds a second matching dark green suitcase cast up on the sand by the high tide. Virginia beach authorities recover the container, finding the upper torso and head of the male victim inside the clinical bags. The face is intact, bearing no signs of rapid decomposition under the local salt water. Forensic artists construct a detailed sketch of the man's features, and investigators begin circulating the likeness across the mid-Atlantic states in hope of public identification.",
-              "On the sixteenth of May, a boater walking a marshy creek near the bridge-tunnel spots the third Kenneth Cole suitcase floating in the shallows. This final bag contains the upper thighs and remaining torso sections, allowing the medical examiner to assemble a complete physical profile of the victim. Autopsy processing recovers two thirty-eight-caliber flat-nosed bullets, matching target ammunition styles from Easton gun stores. The examiner notes the extensive saw marks along the bone, confirming a slow, deliberate physical division after a dual-gunshot execution.",
-              "Within days of the forensic sketch's distribution, a physical therapist and close colleague of Bill McGuire recognizes his friend's features and contacts Jersey Shore police. Dental records and fingerprints verify that the dismembered remains belong to thirty-nine-year-old Bill, who has been missing since late April. New Jersey State Police absorb the homicide case, merging their investigation with local missing persons reports to track his final days. The scale of the crime captures massive public attention across several states.",
+              "On the sixteenth of May, a boater walking a marshy creek near the bridge-tunnel spots the third Kenneth Cole suitcase floating in the shallows. This final bag contains the upper thighs and remaining torso sections, allowing the medical examiner to assemble a complete profile of the victim. Autopsy processing recovers two thirty-eight-caliber flat-nosed bullets, matching target ammunition styles from Easton gun stores. The examiner notes the extensive saw marks along the bone, confirming a slow, deliberate division after a dual-gunshot execution.",
+              "Within days of the forensic sketch's distribution, a therapist and close colleague of Bill McGuire recognizes his friend's features and contacts Jersey Shore police. Dental records and fingerprints verify that the dismembered remains belong to thirty-nine-year-old Bill, who has been missing since late April. New Jersey State Police absorb the homicide case, merging their investigation with local missing persons reports to track his final days. The scale of the crime captures massive public attention across several states.",
               "Detectives examine Bill McGuire's background, uncovering a life shaped by major casino losses and unmonitored debts. His regular trips to Atlantic City's card tables and his volatile personality make him an ideal fit for an organized crime targeting profile. The detectives focus on the Flamingo Motel lot, where Bill's car was towed for parking violations after he disappeared. The prevailing theory among early investigators is a gangland execution, where a man owing large sums was liquidated by professional enforcers.",
               "Back in Woodbridge, Melanie McGuire hosts family members and maintains her role as a terrified, abandoned widow left to raise two toddlers alone. When detectives notify her of the positive identification, she collapses in sorrow, describing her husband's secret gaming debts and unpredictable flights. She urges them to seek answers in Atlantic City's betting circles, where Bill had regular dealings. Her public presentation is perfect, gaining the sympathy of coworkers and neighbors who help her manage the children and coordinate family arrangements.",
               "In late May, Melanie sends two typed anonymous letters to the attorney general's office to divert attention toward Bill's family. The letters claim that Bill's sister and a group of local associates had arranged the murder to capture real estate assets. She includes minor details, such as the location of Bill's ring, to make the accusations appear grounded in inside knowledge. Investigators process the text, finding the phrasing matches Melanie's writing style and contains details only the suspect would know.",
@@ -491,37 +575,37 @@ export default function App() {
             title: "THE FORENSIC NET",
             timePeriod: "July, two thousand and four to June, two thousand and five",
             wordCountTarget: 4000,
-            primaryFocus: "To document the forensic tracking, the unmasking of the physical clues, Dr. Miller's cooperation, Melanie's physical arrest, and her conviction.",
+            primaryFocus: "To document the forensic tracking, the unmasking of the clues, Dr. Miller's cooperation, Melanie's arrest, and her conviction.",
             startEvent: "The discovery of the Delaware E-ZPass toll records",
             endEvent: "The transfer of Melanie McGuire to the Edna Mahan Correctional Facility",
             narrativeBeat: "The Reveal",
             bullets: [
               "In the fall of two thousand and four, investigators unearth the automated E-ZPass toll histories for the McGuire household cars. The digital logs reveal that on the fourth of May, Melanie's private vehicle traveled south along the Delaware Highway, passing automated checkpoints at timestamped intervals. The automated charges refute her story of staying in local New Jersey suburbs to manage her sons that day. When questioned, she claims she was driving to Delaware to look at large furniture outlets, unaware that her digital trail is already solidifying.",
               "Forensic polymer scientists analyze the clear plastic bags recovered from the three green suitcases. Under high magnification, the plastic film displays microscopic extrusion lines left by the manufacturer's machinery during production. Scientists match these fine striations with a block of medical-grade disposal rolls sent to Reproductive Medicine Associates clinic where Melanie worked. The matching lines prove the bags used to wrap Bill McGuire's body came from the exact supply closets Melanie accessed daily.",
-              "Investigators analyze the adhesive surface of the surgical tape used to seal the plastic bags inside the suitcases. They recover microscopic hairs that have been flat-cut by a razor during standard grooming, rather than pulled. DNA extraction from these follicles reveals a genetic profile that matches both Bill McGuire and Melanie McGuire, meaning the tape was handled by a suspect who shared their domestic space. This physical link connects the suitcase contents directly to the McGuire family apartment.",
+              "Investigators analyze the adhesive surface of the surgical tape used to seal the plastic bags inside the suitcases. They recover microscopic hairs that have been flat-cut by a razor during standard grooming, rather than pulled. DNA extraction from these follicles reveals a genetic profile that matches both Bill McGuire and Melanie McGuire, meaning the tape was handled by a suspect who shared their domestic space. This forensic link connects the suitcase contents directly to the McGuire family apartment.",
               "State Police computer forensic experts extract deleted histories from the McGuire family home computer. They recover twenty-three distinct searches completed in mid-April, listing queries for fatal doses of insulin, chloral hydrate sedatives, and methods of committing crimes without detection. The searches align chronologically with the weeks leading to the Warren County house closing, revealing a long phase of preparation. This digital ledger exposes the cold intent behind the crime, replacing the domestic argument story with calculated ambition.",
               "Forensic biologists vacuum the interior floorboards of Bill McGuire's recovered automobile to detect biological transfers. They discover microscopic fragments of human tissue embedded in the carpet fibers near the driver's seat. Tests prove these tiny components belong to Bill McGuire and are consistent with bone and tissue sawdust generated during dismemberment. The particles were tracked into the vehicle on the shoes of the person who drove the car to Atlantic City to plant the false trail.",
               "Detectives interview Dr. Bradley Miller to understand his relationship with Melanie McGuire. Miller confirms their long-term romantic affair and admits that Melanie had made extensive statements to him regarding her husband's sudden departure. He reveals that on the night of the twenty-ninth of April, Melanie told him she had driven to Atlantic City to find Bill's car and move it to the motel lot as a provocation. Miller's statements dismantle Melanie's claims of staying in Woodbridge that entire week.",
               "Bradley Miller agrees to cooperate with New Jersey State Police, allowing them to place a wiretap on his phone line. Over subsequent weeks, Melanie calls Miller frequently, expressing concern over the state investigation's direction and the Morristown clinic. She cautions Miller to remain evasive when investigators ask about supply cabinets and prescription logs. Her recorded statements do not contain a direct confession, but they register the extreme caution of an architect trying to manage an unraveling project.",
-              "Its searches lead investigators to Pennsylvania firearms registries, where they verify that Melanie McGuire crossed the state line to Easton on the twenty-sixth of April, two thousand and four. They recover the physical transaction form signed by her, showing she purchased a thirty-eight-caliber revolver and flat-nosed target ammunition. When the bullet fragments from Bill's body are compared with samples of that target ammunition, the metallurgical profiles match, indicating she used that exact weapon to complete the attack.",
+              "Its searches lead investigators to Pennsylvania firearms registries, where they verify that Melanie McGuire crossed the state line to Easton on the twenty-sixth of April, two thousand and four. They recover the transaction form signed by her, showing she purchased a thirty-eight-caliber revolver and flat-nosed target ammunition. When the bullet fragments from Bill's body are compared with samples of that target ammunition, the metallurgical profiles match, indicating she used that exact weapon to complete the attack.",
               "On the morning of the second of June, two thousand and five, Melanie McGuire drops her sons off at daycare and walks to her car in the parking lot. Uniformed New Jersey State Police cruisers surround her vehicle, and officers approach to place her under arrest. She is taken into custody without incident, showing a calm, silent composure as the handcuffs are secured. She is charged with first-degree murder, desecration of human remains, possession of an illegal weapon, and perjury.",
               "Following a six-week criminal proceeding in early two thousand and seven, a twelve-person jury convicts Melanie on all counts. She maintains her innocence throughout the legal process, and is subsequently transferred to the Edna Mahan Correctional Facility for Women in Clinton, New Jersey. Under the terms of her confinement, she will remain in this secure prison complex for the rest of her life, ineligible to apply for release until she reaches the age of one hundred and one."
             ],
             keyEvents: [
               "In the fall of two thousand and four, investigators unearth the automated E-ZPass toll histories for the McGuire household cars. The digital logs reveal that on the fourth of May, Melanie's private vehicle traveled south along the Delaware Highway, passing automated checkpoints at timestamped intervals. The automated charges refute her story of staying in local New Jersey suburbs to manage her sons that day. When questioned, she claims she was driving to Delaware to look at large furniture outlets, unaware that her digital trail is already solidifying.",
               "Forensic polymer scientists analyze the clear plastic bags recovered from the three green suitcases. Under high magnification, the plastic film displays microscopic extrusion lines left by the manufacturer's machinery during production. Scientists match these fine striations with a block of medical-grade disposal rolls sent to Reproductive Medicine Associates clinic where Melanie worked. The matching lines prove the bags used to wrap Bill McGuire's body came from the exact supply closets Melanie accessed daily.",
-              "Investigators analyze the adhesive surface of the surgical tape used to seal the plastic bags inside the suitcases. They recover microscopic hairs that have been flat-cut by a razor during standard grooming, rather than pulled. DNA extraction from these follicles reveals a genetic profile that matches both Bill McGuire and Melanie McGuire, meaning the tape was handled by a suspect who shared their domestic space. This physical link connects the suitcase contents directly to the McGuire family apartment.",
+              "Investigators analyze the adhesive surface of the surgical tape used to seal the plastic bags inside the suitcases. They recover microscopic hairs that have been flat-cut by a razor during standard grooming, rather than pulled. DNA extraction from these follicles reveals a genetic profile that matches both Bill McGuire and Melanie McGuire, meaning the tape was handled by a suspect who shared their domestic space. This forensic link connects the suitcase contents directly to the McGuire family apartment.",
               "State Police computer forensic experts extract deleted histories from the McGuire family home computer. They recover twenty-three distinct searches completed in mid-April, listing queries for fatal doses of insulin, chloral hydrate sedatives, and methods of committing crimes without detection. The searches align chronologically with the weeks leading to the Warren County house closing, revealing a long phase of preparation. This digital ledger exposes the cold intent behind the crime, replacing the domestic argument story with calculated ambition.",
               "Forensic biologists vacuum the interior floorboards of Bill McGuire's recovered automobile to detect biological transfers. They discover microscopic fragments of human tissue embedded in the carpet fibers near the driver's seat. Tests prove these tiny components belong to Bill McGuire and are consistent with bone and tissue sawdust generated during dismemberment. The particles were tracked into the vehicle on the shoes of the person who drove the car to Atlantic City to plant the false trail.",
               "Detectives interview Dr. Bradley Miller to understand his relationship with Melanie McGuire. Miller confirms their long-term romantic affair and admits that Melanie had made extensive statements to him regarding her husband's sudden departure. He reveals that on the night of the twenty-ninth of April, Melanie told him she had driven to Atlantic City to find Bill's car and move it to the motel lot as a provocation. Miller's statements dismantle Melanie's claims of staying in Woodbridge that entire week.",
               "Bradley Miller agrees to cooperate with New Jersey State Police, allowing them to place a wiretap on his phone line. Over subsequent weeks, Melanie calls Miller frequently, expressing concern over the state investigation's direction and the Morristown clinic. She cautions Miller to remain evasive when investigators ask about supply cabinets and prescription logs. Her recorded statements do not contain a direct confession, but they register the extreme caution of an architect trying to manage an unraveling project.",
-              "Its searches lead investigators to Pennsylvania firearms registries, where they verify that Melanie McGuire crossed the state line to Easton on the twenty-sixth of April, two thousand and four. They recover the physical transaction form signed by her, showing she purchased a thirty-eight-caliber revolver and flat-nosed target ammunition. When the bullet fragments from Bill's body are compared with samples of that target ammunition, the metallurgical profiles match, indicating she used that exact weapon to complete the attack.",
+              "Its searches lead investigators to Pennsylvania firearms registries, where they verify that Melanie McGuire crossed the state line to Easton on the twenty-sixth of April, two thousand and four. They recover the transaction form signed by her, showing she purchased a thirty-eight-caliber revolver and flat-nosed target ammunition. When the bullet fragments from Bill's body are compared with samples of that target ammunition, the metallurgical profiles match, indicating she used that exact weapon to complete the attack.",
               "On the morning of the second of June, two thousand and five, Melanie McGuire drops her sons off at daycare and walks to her car in the parking lot. Uniformed New Jersey State Police cruisers surround her vehicle, and officers approach to place her under arrest. She is taken into custody without incident, showing a calm, silent composure as the handcuffs are secured. She is charged with first-degree murder, desecration of human remains, possession of an illegal weapon, and perjury.",
               "Following a six-week criminal proceeding in early two thousand and seven, a twelve-person jury convicts Melanie on all counts. She maintains her innocence throughout the legal process, and is subsequently transferred to the Edna Mahan Correctional Facility for Women in Clinton, New Jersey. Under the terms of her confinement, she will remain in this secure prison complex for the rest of her life, ineligible to apply for release until she reaches the age of one hundred and one."
             ],
             whatNotToInclude: [
               "Any courtroom or trial proceedings.",
-              "Any aftermath beyond the physical transfer to prison."
+              "Any aftermath beyond the transfer to prison."
             ],
             researchBrief: sections[2]?.researchBrief || "The Pennsylvania gun check, Dr. Miller recorded calls, arrest at daycare, trial and sentence to Edna Mahan for life.",
             narrative: ""
@@ -550,10 +634,51 @@ export default function App() {
 
   const handleParseOutline = async () => {
     if (!outlineText.trim() && !outlineFile) return;
+
+    if (outlineText.trim()) {
+      const originalTitle = extractTitleFromText(outlineText);
+      if (originalTitle) {
+        setCaseTitle(originalTitle);
+      } else {
+        setCaseTitle("Imported Outline");
+      }
+    } else {
+      setCaseTitle("Imported Outline");
+    }
+
     setNarratorIsProcessing(true);
     setError(null);
     setOutlineSource("existing");
     setMaxReachedStep("idle");
+
+    // Clear downstream states to ensure complete clean slate for the new case
+    setSectionResearchUploading({});
+    setUncorrectedSections([]);
+    setSelectedOutlineType("corrected");
+    setNarratorChatHistory([]);
+    setOutlinePlan("");
+    setSuspenseDeclaration(null);
+    setViolationsAudit(null);
+    setReconstructedOutlineViolationsReport("");
+    setOutlinerStrategy("hook");
+    setUserResearchText("");
+    setUserResearchFileName("");
+    setUserResearchSource("system");
+    setUserResearchFile(null);
+    setScratchResearchDossier("");
+    setOutlineViolations([]);
+    setCheckedViolationIds([]);
+    setSuspenseOptions([]);
+    setSelectedSuspenseOptionId("");
+    setSuspenseDialogue([]);
+    setCustomSuspenseBrief("");
+    setCustomCorrectionDialogue([]);
+    setCustomCorrectionUserText("");
+    setPlanningDialogue([]);
+    setPlanningUserText("");
+    setGapsReport("");
+    setDetectedGaps([]);
+    setCheckedGapIds([]);
 
     try {
       const response = await ai.models.generateContent({
@@ -631,30 +756,84 @@ export default function App() {
   
   const handleGenerateDraftSections = async () => {
     if (!scratchTopic.trim()) return;
+    setCaseTitle(scratchTopic.trim());
     setNarratorIsProcessing(true);
     setError(null);
     setOutlineSource("scratch");
     setMaxReachedStep("idle");
 
+    // Clear downstream states to ensure complete clean slate for the new case
+    setSectionResearchUploading({});
+    setUncorrectedSections([]);
+    setSelectedOutlineType("corrected");
+    setNarratorChatHistory([]);
+    setOutlinePlan("");
+    setSuspenseDeclaration(null);
+    setViolationsAudit(null);
+    setReconstructedOutlineViolationsReport("");
+    setOutlinerStrategy("hook");
+    setUserResearchText("");
+    setUserResearchFileName("");
+    setUserResearchSource("system");
+    setUserResearchFile(null);
+    setScratchResearchDossier("");
+    setOutlineViolations([]);
+    setCheckedViolationIds([]);
+    setSuspenseOptions([]);
+    setSelectedSuspenseOptionId("");
+    setSuspenseDialogue([]);
+    setCustomSuspenseBrief("");
+    setCustomCorrectionDialogue([]);
+    setCustomCorrectionUserText("");
+    setPlanningDialogue([]);
+    setPlanningUserText("");
+    setGapsReport("");
+    setDetectedGaps([]);
+    setCheckedGapIds([]);
+
     try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
-        contents: {
-          text: `TOPIC: ${scratchTopic}
+      let text = "";
+      const prompt = `TOPIC: ${scratchTopic}
 
 TASK: Conduct exhaustive, deeply thorough, factual, and historical research into this topic/case. Determine the exact chronological timeline, key dates, names of all real-world actors, witnesses, victims, locations, investigative steps, forensic breakthroughs, and overall outcomes.
 Present a majestic, thoroughly detailed, and highly chronological Case Research Dossier of at least 1500 words. Keep any structural division purely chronological.
 
 Do NOT generate any high-level summary or shallow list. Produce dense, extensive research outlining every factual event from earliest background setup up to final legal resolution. Provide exact testimonies, real dates, and real evidentiary notes from history.
 
-Format your output in professional Markdown.`
-        },
-        config: {
-          safetySettings: STORY_SAFETY_SETTINGS
-        }
-      });
+Format your output in professional Markdown.`;
 
-      const text = response.text || "";
+      try {
+        const response = await ai.models.generateContent({
+          model: "gemini-3.1-pro-preview",
+          contents: { text: prompt },
+          config: {
+            safetySettings: STORY_SAFETY_SETTINGS
+          }
+        });
+        text = response.text || "";
+      } catch (err) {
+        console.warn("Primary research dossier generation failed. Retrying with gemini-3.5-flash fallback...", err);
+      }
+
+      if (!text) {
+        try {
+          const responseFallback = await ai.models.generateContent({
+            model: "gemini-3.5-flash",
+            contents: { text: prompt },
+            config: {
+              safetySettings: STORY_SAFETY_SETTINGS
+            }
+          });
+          text = responseFallback.text || "";
+        } catch (errFallback) {
+          console.error("Backup dossier generation also failed:", errFallback);
+        }
+      }
+
+      if (!text) {
+        throw new Error("Unable to conduct deep case research. This can happen if the topic is highly sensitive or triggers content filters. Please try rephrasing your topic or check your API configuration.");
+      }
+
       setScratchResearchDossier(text);
       setOutlineText(text);
 
@@ -685,13 +864,29 @@ Format your output in professional Markdown.`
     const file = e.target.files?.[0];
     if (!file) return;
 
+    let cleanName = file.name;
+    const lastDot = cleanName.lastIndexOf(".");
+    if (lastDot !== -1) {
+      cleanName = cleanName.substring(0, lastDot);
+    }
+    cleanName = cleanName
+      .replace(/[_\-]/g, " ")
+      .split(" ")
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+      .join(" ");
+
     if (file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
       setNarratorIsProcessing(true);
       setError(null);
       try {
         const arrayBuffer = await file.arrayBuffer();
         const result = await mammoth.extractRawText({ arrayBuffer });
-        setOutlineText(prev => prev + (prev ? "\n\n" : "") + result.value);
+        const textValue = result.value;
+        setOutlineText(prev => prev + (prev ? "\n\n" : "") + textValue);
+        
+        const detected = extractTitleFromText(textValue);
+        setCaseTitle(detected || cleanName);
+        
         setOutlineFile(null); // Clear file as we've extracted text
         confetti({ particleCount: 30, spread: 20, colors: ["#d97706"] });
       } catch (err) {
@@ -710,8 +905,87 @@ Format your output in professional Markdown.`
         data: base64.split(",")[1],
         mimeType: file.type
       });
+      setCaseTitle(cleanName);
     };
     reader.readAsDataURL(file);
+  };
+
+  const handleSectionResearchFileUpload = async (sectionId: string, e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const targetSection = activeSections.find(s => s.id === sectionId);
+    if (!targetSection) return;
+
+    setSectionResearchUploading(prev => ({ ...prev, [sectionId]: true }));
+    setError(null);
+
+    const isDocx = file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document" || file.name.endsWith(".docx");
+
+    try {
+      let documentText = "";
+      let hasInlineData = false;
+      let base64Data = "";
+      let mimeType = file.type;
+
+      if (isDocx) {
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        documentText = result.value;
+      } else if (file.type === "application/pdf" || file.name.endsWith(".pdf")) {
+        const base64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = (ev) => resolve(ev.target?.result as string);
+          reader.onerror = (err) => reject(err);
+          reader.readAsDataURL(file);
+        });
+        base64Data = base64.split(",")[1];
+        mimeType = file.type || "application/pdf";
+        hasInlineData = true;
+      } else {
+        documentText = await file.text();
+      }
+
+      const prompt = `Convert the entire content of the uploaded document/PDF into an extremely detailed, exhaustive Markdown factual dossier.
+You MUST extract, transcribe, and compile EVERYTHING — do NOT selective-extract, summarize, or omit any background context, details, names, dates, quotes, chronological sequences, or locations. Store 100% of the information as a raw factual dossier block so nothing is lost.
+Do not write conversational intros, commentary, headers, or metadata. Return the complete compiled content.`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.1-pro-preview",
+        contents: {
+          parts: [
+            ...(hasInlineData ? [{
+              inlineData: {
+                data: base64Data,
+                mimeType: mimeType
+              }
+            }] : [{ text: `[UPLOADED RESEARCH DOCUMENT CONTENT]\n\n${documentText}` }]),
+            { text: prompt }
+          ]
+        },
+        config: {
+          safetySettings: STORY_SAFETY_SETTINGS
+        }
+      });
+
+      const text = response.text || "";
+      if (!text.trim()) {
+        throw new Error("Gemini returned an empty response. Please verify the file contents.");
+      }
+
+      const existingBrief = targetSection.researchBrief || "";
+      const combinedBrief = existingBrief 
+        ? `${existingBrief}\n\n---\n### Additional Uploaded Research (${file.name}):\n${text}`
+        : text;
+
+      updateSection(sectionId, { researchBrief: combinedBrief });
+      confetti({ particleCount: 30, spread: 25, colors: ["#10b981"] });
+    } catch (err: any) {
+      console.error("Failed to parse research file for section:", err);
+      setError(`Failed to extract research from "${file.name}". Error: ${err.message || err}`);
+    } finally {
+      setSectionResearchUploading(prev => ({ ...prev, [sectionId]: false }));
+    }
   };
 
   const handleResearchAll = async () => {
@@ -748,13 +1022,12 @@ ${userResearchText || "(Presented in the attached PDF/Document file)"}
 [FULL STORY OUTLINE / TOPIC]
 ${outlineText}
 
-[TARGET SECTION FOR RESEARCH EXTRACTION]
+[TARGET SECTION]
 Section Title: "${section.title}"
 Section Description: "${section.description || ''}"
 Bullets: ${(section.bullets || []).join(", ")}
 
-TASK: Your task is to extract, organize, and compile all pertinent names, dates, locations, character descriptions, events, backgrounds, and specific details from [FULL USER-PROVIDED RESEARCH DOCUMENT] that correspond or relate directly to the target section.
-Ensure that you ONLY rely on the facts and information mentioned in [FULL USER-PROVIDED RESEARCH DOCUMENT]. Do NOT invent or make up external facts, storylines, or occurrences. Limit yourself strictly to the provided text. Provide a thorough, structured factual dossier for this specific section.`;
+TASK: You MUST preserve and include the complete [FULL USER-PROVIDED RESEARCH DOCUMENT] content inside this section's research dossier. Do NOT selective-extract, summarize, filter, or omit anything. Return the entire contents of the parsed research text cleanly formatted as Markdown, ensuring that 100% of the names, dates, quotes, timelines, and background context in the custom document are fully present and added to this section's dossier.`;
         } else if (userResearchSource === "combined") {
           promptText = `[FULL USER-PROVIDED RESEARCH DOCUMENT]
 ${userResearchText || "(Presented in the attached PDF/Document file)"}
@@ -762,12 +1035,12 @@ ${userResearchText || "(Presented in the attached PDF/Document file)"}
 [FULL STORY OUTLINE / TOPIC]
 ${outlineText}
 
-[TARGET SECTION FOR RESEARCH EXTRACTION & COMBINATION]
+[TARGET SECTION FOR COMBINATION]
 Section Title: "${section.title}"
 Section Description: "${section.description || ''}"
 Bullets: ${(section.bullets || []).join(", ")}
 
-TASK: You MUST extract all relevant facts, names, events, and background info from [FULL USER-PROVIDED RESEARCH DOCUMENT] that pertains to this target section. Then, using both the user's custom research AND broad, factual outline-driven details/expansion, combine and synthesize them into a single, cohesive, highly-detailed factual dossier for this section. Flawlessly preserve all exact details (e.g., dates/full names) from the user's document alongside the synthesized context.`;
+TASK: You MUST combine and synthesize the FULL contents of [FULL USER-PROVIDED RESEARCH DOCUMENT] with the AI outline-driven factual details/expansion for this section. You are STRICTLY FORBIDDEN from choosing, filtering down, or discarding any part of the uploaded custom research. Make sure that 100% of the names, dates, quotes, timelines, and raw factual details in the custom document are preserved alongside the synthesized system research details in the final output dossier.`;
         } else {
           // Default: "system"
           promptText = `[FULL STORY OUTLINE]\n${outlineText}\n\n[TARGET SECTION FOR RESEARCH]\nSection Title: "${section.title}"\nSection Description: "${section.description || ''}"\nBullets: ${(section.bullets || []).join(", ")}`;
@@ -978,7 +1251,7 @@ Let's return a JSON matching this exact schema:
         model: "gemini-3.1-pro-preview",
         contents: { text: promptChat },
         config: {
-          systemInstruction: "You are an expert story pacing and suspense architect. Your goal is to guide the user to the absolute best suspense preservation strategy for their historical case. Listen to their inputs, refine your proposals, and reply with updated strategies in JSON format.",
+          systemInstruction: "You are a collaborative story pacing and suspense consultant. Your absolute highest directive is to listen to the user, agree with their ideas, and incorporate their feedback and instructions exactly as requested. Do NOT tell the user that their requests are against the rules or refuse to obey. Just listen, adapt, propose updated strategies fully matching their intent, and explain your changes in a positive, supportive tone.",
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -1027,12 +1300,8 @@ Let's return a JSON matching this exact schema:
         setCustomSuspenseBrief(parsed.customSuspenseBrief);
       }
       
-      setSuspenseDialogue(prev => [
-        ...prev,
-        {
-          role: "user" as const,
-          parts: [{ text: userMsg }]
-        },
+      setSuspenseDialogue([
+        ...updatedDialogue,
         {
           role: "model" as const,
           parts: [{ text: parsed.reply || "" }]
@@ -1047,14 +1316,130 @@ Let's return a JSON matching this exact schema:
     }
   };
 
+  const handleSendPlanningMessage = async () => {
+    if (!planningUserText.trim()) return;
+    setNarratorIsProcessing(true);
+    setError(null);
+
+    const userMsg = planningUserText.trim();
+    setPlanningUserText("");
+
+    const updatedDialogue = [
+      ...planningDialogue,
+      {
+        role: "user" as const,
+        parts: [{ text: userMsg }]
+      }
+    ];
+    setPlanningDialogue(updatedDialogue);
+
+    const isScratch = outlineSource === "scratch";
+
+    try {
+      const researchData = sections.map(s => `
+SECTION: ${s.title}
+RESEARCH DOSSIER:
+${s.researchBrief || "N/A"}
+      `).join("\n\n---\n\n");
+
+      const selectedOption = suspenseOptions.find(o => o.id === selectedSuspenseOptionId);
+      const suspenseStrategyContext = selectedOption ? `
+CRITICAL AGREED NARRATIVE SUSPENSE STRATEGY:
+- Title: ${selectedOption.title}
+- Strategy: ${selectedOption.description}
+- Preservation Rules: ${selectedOption.preservationRule}
+${customSuspenseBrief ? `- User Refined Directives: ${customSuspenseBrief}` : ""}
+` : "";
+
+      const promptChat = `CASE: ${isScratch ? scratchTopic : (sections[0]?.title || "This Case")}
+ORIGINAL STORY OUTLINE OR DETAILS:
+${isScratch ? scratchResearchDossier : outlineText}
+
+RESEARCH DATA:
+${isScratch ? scratchResearchDossier : researchData}
+
+${suspenseStrategyContext}
+
+CURRENT OUTLINE PLAN REPORT:
+${outlinePlan}
+
+USER STRUCTURAL / FLOW SUGGESTIONS:
+"${userMsg}"
+
+TASK:
+You are interacting with the user to refine the structural and forensic planning document for this story.
+Analyze their suggestions and feedback. ALWAYS prioritize user intent. If they want callbacks, flashbacks, non-linear progressions, or other structural/timlining changes, listen to them and do what they ask. Do NOT tell them things are against the rules or refuse to obey. Just listen, obey, and incorporate their changes exactly as requested.
+Then:
+1. Re-evaluate and regenerate the entire "Internal Planning Document" report, making sure to fully implement the user's specific structural/story ideas.
+2. Formulate a professional, friendly, and collaborative reply explaining how you have integrated their input into the updated planning report.
+3. You MUST return a JSON structure that contains:
+   - "reply": The direct conversational reply to the user.
+   - "updatedPlan": The completely updated "Internal Planning Document" (retaining the structured sections, while applying all user-requested changes smoothly).
+
+Let's return a JSON matching this exact schema:
+{
+  "reply": "Conversational reply explaining the structural changes made to the plan...",
+  "updatedPlan": "Full markdown of the updated structural planning report reflecting user suggestions..."
+}
+`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.1-pro-preview",
+        contents: { text: promptChat },
+        config: {
+          systemInstruction: "You are a collaborative story consulting advisor and structural planner. Your absolute highest directive is to listen to the user, fully agree with their ideas, and implement their structural or timeline suggestions exactly. If the user asks for flashbacks or changes that seem to diverge from other rules (such as non-linear structures), do NOT tell them it is against the rules or push back. Just listen, cooperate, incorporate their ideas immediately into the updated plan, and respond with a friendly, supportive explanation.",
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              reply: { type: Type.STRING },
+              updatedPlan: { type: Type.STRING, description: "The fully regenerated, extremely detailed forensic planning report incorporating the user's feedback in markdown format." }
+            },
+            required: ["reply", "updatedPlan"]
+          },
+          safetySettings: STORY_SAFETY_SETTINGS
+        }
+      });
+
+      const text = response.text || "{}";
+      let parsed: any = {};
+      try {
+        parsed = JSON.parse(text);
+      } catch (e) {
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+      }
+
+      if (parsed.updatedPlan) {
+        setOutlinePlan(parsed.updatedPlan);
+      }
+      
+      setPlanningDialogue([
+        ...updatedDialogue,
+        {
+          role: "model" as const,
+          parts: [{ text: parsed.reply || "" }]
+        }
+      ]);
+
+      confetti({ particleCount: 80, spread: 40, colors: ["#ea580c"] });
+
+    } catch (err: any) {
+      console.error(err);
+      setError("Failed to refine structural plan. Please try again.");
+    } finally {
+      setNarratorIsProcessing(false);
+    }
+  };
+
   const handleSkipSuspenseAndPlan = async () => {
     setSelectedSuspenseOptionId(null);
     setCustomSuspenseBrief("");
     setSuspenseDeclaration(null);
-    await handlePlanOutline(sections, true);
+    setIsCollectingBlueprint(true);
   };
 
-  const handlePlanOutline = async (researchedSections: NarrativeSection[], skipSuspenseOverride = false) => {
+  const handlePlanOutline = async (researchedSections: NarrativeSection[], skipSuspenseOverride = false, customBlueprint = "") => {
     setNarratorIsProcessing(true);
     setError(null);
 
@@ -1079,6 +1464,11 @@ You MUST align this structural and chronological plan strictly around this suspe
 
 ${suspenseStrategyContext}
 
+${customBlueprint ? `USER PROPOSED BLUEPRINT FOR THE OUTLINE STRUCTURE:
+${customBlueprint}
+
+You MUST accept and use the user's proposed blueprint as your structural starting point/guide. Analyze how they want the sections divided and paced, and plan towards that blueprint. Enforce the required forensic protocols around their proposed sequence.` : ""}
+
 RESEARCH DATA:
 ${scratchResearchDossier}
 
@@ -1086,13 +1476,13 @@ TASK:
 Based on the deep historical research, you must construct an extremely detailed structural and forensic plan to draft a chronological master outline from scratch.
 The narrative complexity of the case (never its timeline duration or span of years) determines the appropriate number of sections (excluding trial/sentencing). Simple stories with a direct chronological plot (e.g., arguments, localized brawls, simple crimes of passion) require typically TWO or THREE sections. Complex stories with multiple developmental phases, plots, or schemes require three or more sections.
 Each section must contain AT LEAST 10 CHRONOLOGICAL BULLET POINTS/EVENTS (MINIMUM of 10, with NO upper cap/limit – let the section's historical complexity determine the maximum). You are STRICTLY FORBIDDEN from rushing to finish the story quickly or ignoring details just to stay close to 10 bullets. Sincere and complete planning means taking your time and mapping the full story, detail-by-detail, so that no external research or secondary source has information that is missing from your outline. If there are 15, 20, 25, or 30+ dense sequential developments in progress, you MUST map all of them.
-Every planned bullet point MUST group a chronological series of related key events, physical movements, and active developments (e.g., "At six in the morning, he went to the bank to withdraw money, met his associate waiting in a running car outside, and received the keys to the vehicle"). You are STRICTLY FORBIDDEN from planning single-action bullet drafts (e.g., "He went to the bank") and trying to pad them with purpose explainers ("this gave him the opportunity to..."), editorial speech/commentary ("this marked the point of no return"), or atmospheric fillers ("the room was silent and cold") to meet word targets. Each bullet plan must be designed at the core as a mini-chronological sequence of what happened and then what happened next. We want to tell the full story without any leaks or gaps.
+Every planned bullet point MUST group a chronological series of related key events, steps of progression, and active developments (e.g., "At six in the morning, he went to the bank to withdraw money, met his associate waiting in a running car outside, and received the keys to the vehicle"). You are STRICTLY FORBIDDEN from planning single-action bullet drafts (e.g., "He went to the bank") and trying to pad them with purpose explainers ("this gave him the opportunity to..."), editorial speech/commentary ("this marked the point of no return"), or atmospheric fillers ("the room was silent and cold") to meet word targets. Each bullet plan must be designed at the core as a mini-chronological sequence of what happened and then what happened next. We want to tell the full story without any leaks or gaps.
 
 In this planning phase, write an extensive report answering and discussing each of the following in detail:
 1. THE POINT OF DISRUPTION STARTING POINT (CRITICAL): Find and start the story exactly at the "Point of Disruption" where it first becomes clear there is a problem, which directly serves as the catalyst leading to the climax of the case. Do NOT start with family history, childhood, births, or community background. All of those things are extremely boring and kill audience retention. Explain why starting at the Point of Disruption sets up a powerful chronological progression leading path to the climax.
 2. DETERMINATION OF COMPLEXITY AND SECTION COUNT (CRITICAL): Rigorously analyze the causal complexity of the story (the cause-and-effect sequence, "one thing leading to another, leading to another") from the Point of Disruption to the resolution. Explain why the narrative timeline does or does not warrant multiple sections. Choose a section count dynamically based on this complexity (typically TWO or THREE sections for simple cases, and three or more for complex cases) and write a thorough explanation justifying this choice. Indicate how many key events/bullets are planned for each section.
 3. CHRONOLOGICAL MATRIX & STORY FLOW: Outline the exact narrative flow from the disruption to the climax and resolution. How will we divide the timeline chronologically across these sections? You are STRICTLY FORBIDDEN from planning or creating a separate, dedicated chapter or section for court/trial/sentencing. Fold the final outcome (how they were dealt with, went to prison, died) directly into the last 2 or 3 bullets of the final section as direct chronological history.
-4. EVENT LEVEL PLANNING (AT LEAST 10 EVENTS PER SECTION, NO UPPER CAP): Discuss the key sequential events we will write into each section. Explain how we will compile at least 10 highly rich, detailed, distinct chronological occurrences per section, scaling higher if the section's historical complexity demands it, providing high-fidelity fact density with absolutely no rigid caps. Every planned bullet MUST group multiple related sequential physical developments in progress (what happened, and then what happened next). Ensure our planned bullets are never single-action placeholders padded with explanations or weather.
+4. EVENT LEVEL PLANNING (AT LEAST 10 EVENTS PER SECTION, NO UPPER CAP): Discuss the key sequential events we will write into each section. Explain how we will compile at least 10 highly rich, detailed, distinct chronological occurrences per section, scaling higher if the section's historical complexity demands it, providing high-fidelity fact density with absolutely no rigid caps. Every planned bullet MUST group multiple related sequential developments in progress (what happened, and then what happened next). Ensure our planned bullets are never single-action placeholders padded with explanations or weather.
 5. REASONABLE WORD COUNT TARGET: For each section, discuss and specify a reasonable, sincere word count target (e.g., 3,000 to 5,000 words per section) that matches the extreme event density. Ensure we do not resort to padding, commentary, significance, or atmospheric scenery to hit this; word count must be driven entirely by sequential fact planning.
 6. OMNISCIENT PERSPECTIVE & BIAS FILTER (ZERO CELL-PING & ZERO-COURTROOM-DRAMA CONSTRAINTS): Explain how we will ensure a 100% omniscient perspective. Identify and completely purge any default detective-focused, court/trial-focused, cell tower trace, minute-by-minute mechanical micro-action, or list redundant habits. You are strictly forbidden from writing or planning active courtroom scenes, legal arguments, or trial proceedings. However, standard character titles/descriptors like "attorney" or "lawyer", and simple final historical outcomes like "sentenced to thirty years in prison" or "guilty" folded into the final closing bullets are 100% acceptable. Any cell phone records, tower ping maps, or tracker operations are also 100% forbidden; plan to narrate phone calls and actions direct from history. We will have absolutely zero active courtroom presence or trial scenes.
 7. HOW WE PREVENT CORE PROTOCOL VIOLATIONS: Discuss how we will maintain strict adherence to:
@@ -1108,7 +1498,7 @@ Provide a highly professional, detailed, and structured report.`;
         const researchData = researchedSections.map(s => `
 SECTION: ${s.title}
 RESEARCH DOSSIER:
-\${s.researchBrief}
+${s.researchBrief || "N/A"}
       `).join("\n\n---\n\n");
 
         prompt = `ORIGINAL OUTLINE:
@@ -1116,8 +1506,17 @@ ${outlineText}
 
 ${suspenseStrategyContext}
 
+${customBlueprint ? `USER PROPOSED BLUEPRINT FOR THE OUTLINE STRUCTURE:
+${customBlueprint}
+
+You MUST accept and use the user's proposed blueprint as your structural starting point/guide. Analyze how they want the sections divided and paced, and plan towards that blueprint. Enforce the required forensic protocols around their proposed sequence.` : ""}
+
 RESEARCH DATA:
-${researchData}`;
+${researchData}
+
+TASK:
+Based on the original outline and deep research, construct an extremely detailed structural and forensic plan to draft a chronological master outline.
+Even if a custom blueprint is provided, you MUST develop and output the COMPLETE, EXHAUSTIVE 7-part planning report as specified in the PLANNING OUTPUT FORMAT of the protocols. Do NOT write simple confirmations, short responses, or phrases like "No structural issues detected." You must write a full, rigorous analysis.`;
 
         sysInst = outlinerStrategy === "preserve_structure"
           ? `${OUTLINE_PLANNING_PROTOCOL}\n\nCRITICAL STRATEGY OVERRIDE: STRICT STRUCTURE FIDELITY AND AUDIT
@@ -1134,16 +1533,50 @@ In the PLANNING OUTPUT FORMAT section '2. THE STARTING POINT (CRITICAL)', clearl
             : OUTLINE_PLANNING_PROTOCOL;
       }
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.1-pro-preview",
-        contents: { text: prompt },
-        config: {
-          systemInstruction: sysInst,
-          safetySettings: STORY_SAFETY_SETTINGS
-        }
-      });
+      let responseText = "";
+      try {
+        const response = await ai.models.generateContent({
+          model: "gemini-3.1-pro-preview",
+          contents: { text: prompt },
+          config: {
+            systemInstruction: sysInst,
+            safetySettings: STORY_SAFETY_SETTINGS
+          }
+        });
+        responseText = response.text || "";
+      } catch (err) {
+        console.warn("Primary model (gemini-3.1-pro-preview) failed or blocked. Trying backup model (gemini-3.5-flash)...", err);
+      }
 
-      setOutlinePlan(response.text || "No structural issues detected.");
+      if (!responseText) {
+        try {
+          const responseFallback = await ai.models.generateContent({
+            model: "gemini-3.5-flash",
+            contents: { text: prompt },
+            config: {
+              systemInstruction: sysInst,
+              safetySettings: STORY_SAFETY_SETTINGS
+            }
+          });
+          responseText = responseFallback.text || "";
+        } catch (errFallback) {
+          console.error("Backup model (gemini-3.5-flash) also failed:", errFallback);
+        }
+      }
+
+      if (!responseText) {
+        throw new Error("Unable to generate planning document. This can happen if the case facts are highly sensitive or trigger safety thresholds. Please try refining or simplifying your blueprint text or check your API configuration.");
+      }
+
+      setOutlinePlan(responseText);
+      setPlanningDialogue([
+        {
+          role: "model" as const,
+          parts: [{ text: `I have constructed the complete structural and forensic plan based on our suspense parameters. 
+
+Please review the report on the left. You can type suggestions in the box here to adjust the story structure, divide specific sections, suggest focus shifts, or prioritize certain clues. I am entirely here to listen to you and rebuild the report according to your guidelines!` }]
+        }
+      ]);
       setCurrentNarratorStep("planned");
       confetti({ particleCount: 120, spread: 60, colors: ["#d97706"] });
     } catch (err) {
@@ -1194,7 +1627,7 @@ Perform a rigorous verification and safety audit on the structural plan. Check f
 2. INVESTIGATIVE DETECTIVE, COURTROOM & CELL-PING VIOLATIONS: Is there any risk that the events in any section will be narrated through the eyes of the police, courts, or witness reports instead of real-time omniscient action? We want to avoid active courtroom scenes and trial play-by-plays. Do NOT flag character professions/nouns like "attorney", "lawyer", or "prosecutor", and do NOT flag standard final sentencing/justice terms (e.g. "sentenced to life imprisonment", "guilty") folded into the final bullets of the closing section. Does the plan propose any dedicated or independent section for court or trial? If so, flag it as a critical violation and direct that it be merged/removed, with only a 2-3 bullet outcome at the very end. Are there any plans to mention retroactive cell phone signal mapping or cellular tower pings? Flag cell records tracking as 100% banned.
 3. OUTLINE PROPORTION & DEPTH: Does the plan fully guarantee that the number of sections matches the complexity of the case (with no rigid upper caps on sections), and that each section will contain at least 10 highly rich, distinct chronological events, with no artificial upper limits or rigid rules capping them if the history contains more details? Are there any shallow portions?
 4. NARRATIVE REPETITION RISK (Say-it-once): Do any planned events overlap across sections or repeat facts?
-5. TEMPORAL LEAPS & FLASHBACKS: Are any flashbacks or premonitions planned that break the chronological forward-moving time flow?
+5. TEMPORAL LEAPS & FLASHBACKS: Flashbacks, non-linear timelines, or structural leaps are fully permitted when needed or when explicitly requested by the user. Do not flag them as violations if they serve a narrative need or the user wants them. Only ensure they do not cause unintended logical repetition or confusion.
 6. IMPLICIT VIOLATIONS / ATMOSPHERE: Are there risks of incorporating non-event filler (how characters felt, city's eerie mood, weights of vehicles or technical jargon)?
 
 Provide a detailed, bulleted Forensic Audit and Correction directive specifying any adjustments needed to make sure the final generated outline is completely robust and 100% compliant.`;
@@ -1297,16 +1730,16 @@ TASK:
 You must now construct the final, master chronological narrative outline.
 Generate a JSON object containing a "sections" array of NarrativeSections based on the Research, Plan, and Audit.
 
-CRITICAL HARD CONSTRAINTS:
-1. START EXACTLY AT THE POINT OF DISRUPTION: Section one MUST start precisely at the chronological Point of Disruption (where things first become clear there is a problem/catalyst that leads to the climax of the case). You are strictly forbidden from starting with childhood, births, parentage timelines, or town backgrounds. All of those things are extremely boring and kill audience retention. Weave any crucial prior background relations or motives naturally as brief context in later relevant action paragraphs.
+CRITICAL HARD CONSTRAINTS (NO STORY STRIPPING - 1,500 to 3,000 WORDS OF OUTLINE TEXT PER SECTION REQUIRED):
+1. START EXACTLY AT THE POINT OF DISRUPTION: Section one MUST start precisely at the chronological Point of Disruption (where things first become clear there is a problem/catalyst that leads to the climax of the case). You are strictly forbidden from starting with childhood, births, parentage timelines, or town backgrounds. All of those things are extremely boring and kill audience retention. Weave any crucial prior background relations or motives naturally as brief context in later relevant action paragraphs. Do NOT throw away crucial backstories, parentage, relationship dynamics, or motives; identify and weave them contextually into later actions so no information is lost.
 2. SECTION COUNT DETERMINED BY COMPLEXITY: Decide on the appropriate number of sections (e.g., three or more) depending on the complexity of the case and the story itself. Allocate the entire chronological story timeline across these dense sections. Avoid artificial caps or limits so there are absolutely no leaks, skipped gaps, or missing information.
-3. EXHAUSTIVE CHRONOLOGICAL BULLET POINTS (NO RUSHING, AT LEAST 10 per section): Each section MUST contain at least 10 highly rich, detailed, sequentially ordered events in its "bullets" array. Do not truncate, and NEVER rush to finish the story quickly just to meet a certain bullet count! Take your time and map the entire, complete story with absolute narrative fidelity. There must be zero missing parts, skipped milestones, or omitted developments—if someone reads your outline, they should have the full picture without ever needing to consult another source. If the chronological complexity of a section requires 15, 20, 25, or 30+ dense bullets to map all actions exhaustively, you MUST scale the bullet count higher. Sincere storytelling requires listing every sequential fact from first action to final outcome. If a section covers a large chunk of time or many developments, map each event individually.
+3. EXHAUSTIVE CHRONOLOGICAL ACTION BEATS (15 to 30 RICH BULLETS PER SECTION): Each section MUST contain at least 15 to 30 highly rich, detailed, sequentially ordered events in its "bullets" array. The total word count of the outline points inside each section MUST BE AT LEAST 1,500 to 3,000 words. We are strictly banning skeleton outlines (e.g., 400-word outlines are completely forbidden as they leave only useless bones). Do not truncate, and NEVER rush to finish the story quickly! Take your time and map the entire, complete story with absolute narrative fidelity. Every single chronological development, transaction, agreement, disagreement, meeting, travel, dispute, clue, action, behavior shift, and milestone from the research must be fully represented. There must be zero missing parts, skipped milestones, or omitted developments—if someone reads your outline, they should have the full picture without ever needing to consult another source. If the chronological complexity of a section requires 20, 25, or 30+ dense bullets to map all actions exhaustively, you MUST scale the bullet count higher. Sincere storytelling requires listing every sequential fact from first action to final outcome. If a section covers a large chunk of time or many developments, map each event individually. Do NOT hide behind bans on micro-actions or atmospheric detail to slash actual historical events and actions. Include the full meat.
 4. NO ATMOSPHERIC NOISE, SCENERY, OR TRIVIAL PRECISION: Focus purely on objective, chronological, concrete events, actions, timeline developments, and facts. You are strictly forbidden from writing atmospheric scenery (the yellowish glow of high-pressure sodium streetlights, clear evening skies, etc.) or trivial numerical measurements with useless precision (approximately forty yards, exactly two point four seconds, carrying fifteen pounds, etc.) unless they directly and immediately caused the next plot event. 
-5. STRICT OMNISCIENT VOICE & ZERO-MICRO-ACTION RULE: Present every single bullet point in an omniscient, real-time voice (action-driven). No "investigators discover", no "according to police", no testimony framing. Detail the actions as they occurred in history. You are strictly forbidden from writing bullet points about mapping cell signal coordinates or mobile phone tower retroactive trace logs. You are ALSO strictly forbidden from describing minute-by-minute micro-actions or mechanical routine operations (such as opening the door, sliding inside, inserting metal key, sparking engine, shifting transmission, etc.). Tell the story on a plot-beat level (e.g. "He entered his car and reversed" instead of describing physical muscle movements). If a detail does not affect what happens next, omit it entirely.
+5. STRICT OMNISCIENT VOICE & ZERO-MICRO-ACTION RULE: Present every single bullet point in an omniscient, real-time voice (action-driven). No "investigators discover", no "according to police", no testimony framing. Detail the actions as they occurred in history. You are strictly forbidden from writing bullet points about mapping cell signal coordinates or mobile phone tower retroactive trace logs. You are ALSO strictly forbidden from describing minute-by-minute micro-actions or mechanical routine operations (such as opening the door, sliding inside, inserting metal key, sparking engine, shifting transmission, etc.). Tell the story on a plot-beat level (e.g. "He entered his car and reversed" instead of describing detailed bodily actions). If a detail does not affect what happens next, omit it entirely.
 6. NO SENTENCE REDUNDANCY: Do not say the same thing in different words or write redundant sentences in the same bullet or section. Every single sentence must introduce a new, active chronological event or plot progression. 
 7. EVERY date and number MUST be written in full words (e.g., 'the tenth of october nineteen ninety six', 'five hundred thousand dollars', etc.). No digits allowed!
 8. TRUE BULLET DENSITY (NO SHALLOW OR DISGUISED BULLETS): Every bullet point/event in the JSON MUST contain a group of specific related events in chronological series. You are strictly forbidden from writing a single-action bullet (e.g., "he went to the bank") and then padding that bullet point with purpose explainers ("which allowed him to..."), editorial speech/commentary ("this marked the point of no return"), or atmospheric/environmental fillers ("the room was silent and cold"). A proper bullet is a multi-sentence chronological paragraph (at least 3-5 sentences long, around 60 to 120 words) containing a series of sequential events or actions (what happened, and then what happened next).
-9. ZERO COURT OR TRIAL SCENE DRAMA (NO ACTIVE COURTROOM FIGHTS): You are strictly forbidden from creating a dedicated or separate section, or writing any bullet points, containing active courtroom debates, lawyer speeches, jury selections, witness courtroom testimonies, or legal hearings. Banish active courtroom drama entirely. However, you are 100% permitted to use standard character titles or professions to identify characters (e.g., "attorney", "lawyer", "defense attorney", "prosecutor") and report the direct, factual outcome (verdict or sentence) fold-out. Simple direct finality terms folded into the final closing 2 or 3 bullet points of the final section (e.g. "sentenced to life imprisonment", "sentenced to thirty years in a state prison Block", "guilty", "convicted") are completely acceptable and MUST NOT be flagged. Describe the physical, real-world historical results of how characters were dealt with plainly.
+9. ZERO COURT OR TRIAL SCENE DRAMA (NO ACTIVE COURTROOM FIGHTS): You are strictly forbidden from creating a dedicated or separate section, or writing any bullet points, containing active courtroom debates, lawyer speeches, jury selections, witness courtroom testimonies, or legal hearings. Banish active courtroom drama entirely. However, you are 100% permitted to use standard character titles or professions to identify characters (e.g., "attorney", "lawyer", "defense attorney", "prosecutor") and report the direct, factual outcome (verdict or sentence) fold-out. Simple direct finality terms folded into the final closing 2 or 3 bullet points of the final section (e.g. "sentenced to life imprisonment", "sentenced to thirty years in a state prison Block", "guilty", "convicted") are completely acceptable and MUST NOT be flagged. Describe the actual, real-world historical results of how characters were dealt with plainly.
 11. STRICTOR CORE COMPLIANCE WITH FORENSIC AUDIT: You must review the FORENSIC INTEGRITY AUDIT report closely and actively correct every single violation flagged. You are strictly forbidden from ignoring the audit's findings or repeating the flagged errors in the final outline. All identified violations must be fully resolved.
 ${suspenseReconstructionRules}
 
@@ -1394,7 +1827,7 @@ Ensure that the final output maintains 100% section-by-section structural alignm
 You MUST start the refined story outline EXACTLY where the original outline started. Do NOT shift the opening of the story to a later crime hook or skip early sections/setup.
 From that original started point, organize and chronologicalize all subsequent sections/chapters.
 Do NOT tell any part of the story through police/investigator/witness/court perspective framing. Ensure the facts are narrated directly as they happened in real-time. Preserve all detail, depth, and density from the original outline without summary.`
-            : OUTLINE_REFINEMENT_PROTOCOL) + "\n\nCRITICAL DATE RULE: You MUST write out all dates in full words. No digits for days or years. (e.g., 'the second of march, twenty twenty three').\n\nCRITICAL QUALITY RULE: DO NOT SUMMARIZE OR SHORTEN ANY KEY EVENTS. Every bullet/event in the output JSON MUST be extremely rich and detailed (at least 3-5 sentences, 60-120 words per bullet point) as per the OUTLINE_REFINEMENT_PROTOCOL. Single-sentence bullet points are strictly forbidden and make the output useless.\n\nCRITICAL FORWARD-ONLY RULE: Length must come from chronological depth, never from restatement or atmospheric padding. Every sentence within a bullet must advance the action to a new moment or introduce a new fact. No explanatory sentences, atmospheric wrap-ups, or logical conclusion repetitions.";
+            : OUTLINE_REFINEMENT_PROTOCOL) + "\n\nCRITICAL DATE RULE: You MUST write out all dates in full words. No digits for days or years. (e.g., 'the second of march, twenty twenty three').\n\nCRITICAL QUALITY RULE (NO STORY STRIPPING - 1,500 to 3,000 WORDS PER SECTION REQUIRED): DO NOT SUMMARIZE, SHORTEN, OR SLICE OUT ANY EVENTS. Every section outline MUST have at least 15 to 30 rich, detailed, narrative-dense bullet points (aiming for 1,500 to 3,000 words *of outline text per section* in total). Every bullet/event in the output JSON MUST be extremely rich and detailed (at least 3-5 sentences, 60-150 words per bullet point) as per the OUTLINE_REFINEMENT_PROTOCOL. Single-sentence bullet points are strictly forbidden and make the output useless. Never use bans on micro-actions or atmosphere as an excuse to exclude actual plot events, conflict developments, transactions, disagreements, or meetings. Include the full narrative meat of the case dossier!\n\nCRITICAL FORWARD-ONLY RULE: Length must come from chronological depth, never from restatement or atmospheric padding. Every sentence within a bullet must advance the action to a new moment or introduce a new fact. No explanatory sentences, atmospheric wrap-ups, or logical conclusion repetitions.\n\nCRITICAL SENTENCE FLOW RULE: Within each bullet point, you MUST connect sentences that are logically, chronologically, or action-wise related using natural connectors (e.g., 'and', 'then', 'after that') instead of writing choppy, staccato, isolated sentences. Stop being in a hurry to use full stops! Connect dialogues and speech reports smoothly instead of repeating speech attributions (e.g., say 'She told him that she went to the family house and would come later, adding that she would be late for that night' instead of using choppy separate sentences like 'She said X. She told him Y. She mentioned Z').";
       }
 
       const response = await ai.models.generateContent({
@@ -1473,11 +1906,253 @@ Do NOT tell any part of the story through police/investigator/witness/court pers
       });
 
       setSections(refined);
-      setCurrentNarratorStep("refined");
+      setCurrentNarratorStep("gaps");
       confetti({ particleCount: 150, spread: 70, colors: ["#d97706"] });
     } catch (err) {
       console.error(err);
       setError("Failed to refine the outline. The research was successful, but the final rewrite failed.");
+    } finally {
+      setNarratorIsProcessing(false);
+    }
+  };
+
+  const handleDetectGaps = async (currentSections: NarrativeSection[]) => {
+    setNarratorIsProcessing(true);
+    setError(null);
+
+    try {
+      const outlineRepresentation = currentSections.map(s => `
+SECTION ${s.sectionNumber || s.id}: ${s.title}
+TIME PERIOD: ${s.timePeriod || 'N/A'}
+PRIMARY FOCUS: ${s.primaryFocus || 'N/A'}
+KEY EVENT BULLETS:
+${getNormalizedEvents(s).map((b, bIdx) => `  ${bIdx + 1}. ${b}`).join("\n")}
+`).join("\n\n---\n\n");
+
+      const researchRepresentation = currentSections.map(s => `
+SECTION ${s.sectionNumber || s.id}: ${s.title}
+RESEARCH DOSSIER:
+${s.researchBrief || "N/A"}
+`).join("\n\n---\n\n");
+
+      const suspenseRule = suspenseDeclaration ? `
+SUSPENSE STRATEGY IN FOCUS (CRITICAL):
+Primary Type: ${suspenseDeclaration.primaryType}
+Withheld Information: ${suspenseDeclaration.withheldInformation}
+Reveal Window: ${suspenseDeclaration.revealWindow}
+Strict Exclusions (DO NOT INJECT THESE IN PRE-REVEAL SECTIONS): ${suspenseDeclaration.strictExclusions}
+` : "No specific suspense strategy declared.";
+
+      const prompt = `PHASE: GAP DETECTION & HISTORICAL COMPLETENESS AUDIT
+GOAL: Compare the reconstructed outline sections against their matching research dossiers to find any missing chronological details, key facts, or historical milestones that were skipped.
+
+CRITICAL CONSTRAINT: 
+You MUST respect the active Suspense Strategy! If a research detail is missing from an early section because it belongs to the strategically withheld category of information (e.g., identity of the killer, toxic chemicals used before the autopsy reveal, secret motives, etc.), you MUST NOT label it as a missing gap. Spot deliberately withheld details to preserve suspense, and preserve them!
+
+Only list genuine gaps - historical developments that should be told chronologically without violating the suspense strategy.
+
+RESOURCES:
+1. RECONSTRUCTED OUTLINE UNDER AUDIT:
+${outlineRepresentation}
+
+2. DEEP CASE RESEARCH DOSSIERS:
+${researchRepresentation}
+
+3. ACTIVE SUSPENSE RULES:
+${suspenseRule}
+
+TASK:
+Perform a deep comparison between the outline bullets and the dossiers for each section.
+If a critical event, clue, behavior shift, transaction, meeting, or outcome from research is missing, identify it.
+Determine where it chronologically fits (approximate section, and whether it fits inside an existing bullet point or should be written as a separate new bullet point).
+Explain what actual details are missing.
+Generate a proposed updated bullet point (60-120 words, multi-sentence chronological series of events) resolving the gap.
+
+Return the JSON block exactly matching the responseSchema.`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.1-pro-preview",
+        contents: { text: prompt },
+        config: {
+          systemInstruction: "You are a meticulous Senior Narrative Archival Historian and Gap Analyst. Your goal is to identify chronological omissions, gaps, and skipped facts in a narrative reconstructed outline by comparing it to deep research. You must respect the suspense strategy to verify if missing details are actually planned withholdings, skipping them if so. Produce a precise JSON list of gaps and a markdown summary log.",
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              gaps: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    sectionNumber: { type: Type.INTEGER, description: "1-based section number where gap occurs" },
+                    gapDescription: { type: Type.STRING, description: "What key historical detail or fact is missing from the section" },
+                    chronologicalPosition: { type: Type.STRING, description: "Describe where exactly this fits chronologically" },
+                    howToApply: { type: Type.STRING, enum: ["existing", "new"], description: "Whether to modify an existing bullet or add a brand-new bullet point" },
+                    targetBulletIndex: { type: Type.INTEGER, description: "0-based index of the bullet, required only if howToApply is 'existing'" },
+                    proposedCorrection: { type: Type.STRING, description: "The complete, rich, multi-sentence narrative bullet point (60-120 words) incorporating the detail in chronological progression with adjacent events." }
+                  },
+                  required: ["sectionNumber", "gapDescription", "chronologicalPosition", "howToApply", "proposedCorrection"]
+                },
+                description: "Array of detected historical gaps or missing details"
+              },
+              summaryMarkdown: { type: Type.STRING, description: "Detailed markdown audit logging findings, analysis on research vs outline, and how suspense was preserved" }
+            },
+            required: ["gaps", "summaryMarkdown"]
+          },
+          safetySettings: STORY_SAFETY_SETTINGS
+        }
+      });
+
+      const text = response.text || "{}";
+      let parsed: any = {};
+      try {
+        parsed = JSON.parse(text);
+      } catch (e) {
+        const jsonMatch = text.match(/\{[\s\S]*\}/) || text.match(/\[[\s\S]*\]/);
+        if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+      }
+
+      const gapsList: DetectedGap[] = [];
+      if (parsed && Array.isArray(parsed.gaps)) {
+        parsed.gaps.forEach((g: any, gIdx: number) => {
+          gapsList.push({
+            id: `g_${g.sectionNumber}_${g.targetBulletIndex || 0}_${gIdx}_${Math.random().toString(36).substr(2, 5)}`,
+            sectionNumber: Number(g.sectionNumber),
+            targetBulletIndex: g.targetBulletIndex !== undefined ? Number(g.targetBulletIndex) : undefined,
+            gapDescription: g.gapDescription || "",
+            chronologicalPosition: g.chronologicalPosition || "",
+            howToApply: g.howToApply === "existing" ? "existing" : "new",
+            proposedCorrection: g.proposedCorrection || ""
+          });
+        });
+      }
+
+      setDetectedGaps(gapsList);
+      setCheckedGapIds(gapsList.map(g => g.id));
+      setGapsReport(parsed.summaryMarkdown || "Gap analysis completed. No major historical omissions detected.");
+      confetti({ particleCount: 150, spread: 70, colors: ["#d97706"] });
+    } catch (err) {
+      console.error(err);
+      setError("Failed to run gap detection analysis. Please try again.");
+    } finally {
+      setNarratorIsProcessing(false);
+    }
+  };
+
+  const handleInjectGaps = async (currentSections: NarrativeSection[]) => {
+    setNarratorIsProcessing(true);
+    setError(null);
+
+    try {
+      const activeGaps = detectedGaps.filter(g => checkedGapIds.includes(g.id));
+      
+      if (activeGaps.length === 0) {
+        // No gaps selected, transition directly to refined step
+        setCurrentNarratorStep("refined");
+        setNarratorIsProcessing(false);
+        return;
+      }
+
+      const outlineRepresentation = currentSections.map(s => `
+SECTION ${s.sectionNumber || s.id}: ${s.title}
+TIME PERIOD: ${s.timePeriod || 'N/A'}
+PRIMARY FOCUS: ${s.primaryFocus || 'N/A'}
+KEY EVENT BULLETS:
+${getNormalizedEvents(s).map((b, bIdx) => `  ${bIdx + 1}. ${b}`).join("\n")}
+`).join("\n\n---\n\n");
+
+      const gapsToInjectRepresentation = activeGaps.map(g => `
+GAP ID: ${g.id}
+SECTION NUMBER: ${g.sectionNumber}
+HOW TO APPLY: ${g.howToApply === "existing" ? `Replace or enrich Bullet Index ${g.targetBulletIndex}` : 'Insert as a Standalone New Chronological Bullet'}
+DIRECTIONS: ${g.gapDescription}
+CHRONOLOGICAL POSITION: ${g.chronologicalPosition}
+PROPOSED NARRATIVE BULLET: ${g.proposedCorrection}
+`).join("\n\n---\n\n");
+
+      const prompt = `PHASE: GAP INJECTION & RECONSTRUCTION FINALIZATION
+GOAL: Inject the selected missing historical details surgically into our reconstructed story outline.
+
+CURRENT RECONSTRUCTED OUTLINE:
+${outlineRepresentation}
+
+SELECTED GAPS TO INJECT:
+${gapsToInjectRepresentation}
+
+INSTRUCTIONS:
+1. For each selected gap, apply it carefully to the designated section.
+2. If howToApply is "existing" (Replace or enrich Bullet), find that bullet and replace/merge it with the new proposed narrative bullet.
+3. If howToApply is "new" (Insert standalone bullet), insert it in the correct chronological order among the existing bullets of that section.
+4. Ensure every modified or new bullet point is highly rich and detailed (at least 3-5 sentences, 60-120 words), adhering 100% to chronological omniscient action rules, zero numbers/digits, and no atmospheric noise.
+5. All other bullets and sections MUST be preserved exactly in their full length and depth. Do NOT summarize or shorten them.
+
+Return the updated outline matching this JSON schema:
+{
+  "sections": [
+    {
+      "sectionNumber": 1,
+      "title": "Section Title",
+      "timePeriod": "Time period",
+      "wordCountTarget": 5000,
+      "primaryFocus": "Focus text",
+      "bullets": [
+        "Updated bullet list..."
+      ]
+    }
+  ]
+}
+`;
+
+      const response = await ai.models.generateContent({
+        model: "gemini-3.1-pro-preview",
+        contents: { text: prompt },
+        config: {
+          systemInstruction: "You are an elite Narrative Architect specialized in surgical story injections. Your absolute directive is to merge the selected gaps into the narrative outline without altering any other pristine details or summarizing unaffected sections. Return only valid JSON conforming to the requested schema.",
+          responseMimeType: "application/json",
+          safetySettings: STORY_SAFETY_SETTINGS
+        }
+      });
+
+      const text = response.text || "{}";
+      let parsed: any = {};
+      try {
+        parsed = JSON.parse(text);
+      } catch (e) {
+        const jsonMatch = text.match(/\{[\s\S]*\}/) || text.match(/\[[\s\S]*\]/);
+        if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+      }
+
+      let updatedSections: NarrativeSection[] = [];
+      if (parsed.sections && Array.isArray(parsed.sections)) {
+        updatedSections = parsed.sections;
+      }
+
+      if (updatedSections.length === 0) {
+        throw new Error("Unable to parse injected outline response.");
+      }
+
+      // Map back unchanged metadata/briefs to final sections
+      const finalized = currentSections.map((origSec, idx) => {
+        const matched = updatedSections.find(u => u.sectionNumber === origSec.sectionNumber) || updatedSections[idx];
+        if (matched) {
+          return {
+            ...origSec,
+            bullets: matched.bullets || (matched as any).keyEvents || [],
+            keyEvents: matched.bullets || (matched as any).keyEvents || [],
+            title: matched.title || origSec.title,
+            timePeriod: matched.timePeriod || origSec.timePeriod,
+            primaryFocus: matched.primaryFocus || origSec.primaryFocus
+          };
+        }
+        return origSec;
+      });
+
+      setSections(finalized);
+      setCurrentNarratorStep("refined");
+      confetti({ particleCount: 150, spread: 70, colors: ["#10b981"] });
+    } catch (err) {
+      console.error(err);
+      setError("Failed to inject the missing details. Please try again or skip this step.");
     } finally {
       setNarratorIsProcessing(false);
     }
@@ -1662,7 +2337,7 @@ OPERATIONAL EDITING CONSTRAINTS (CRITICAL):
 1. DEEP REFINEMENT INTENSITY: Each key event (bullet point) in updated sections must remain highly detailed, immersive, and multi-sentence paragraphs (each containing 60-120 words or 3-5 sentences), unless the user explicitly requested a change to the style/detail of specific parts.
 2. PRESERVE UNTOUCHED SECTIONS: If the user's instructions only target a specific section or event, do not truncate or shorten the other untouched sections. Leave them fully detailed and preserve their original event list exactly.
 3. ABSOLUTE DATE RULE: All dates/numbers must remain written in full words (e.g., 'the fifteenth of november, two thousand four', 'six o'clock', 'thirty one thousand dollars') without digits, unless requested otherwise.
-4. ZERO TRIAL/COURT TERM PRESENCE: Unless the user's explicit historical facts demand describing a physical custody change or a plain physical outcome, keep all legal/judicial terms and courtroom framing strictly banned.
+4. ZERO TRIAL/COURT TERM PRESENCE: Unless the user's explicit historical facts demand describing a custody change or a plain outcome, keep all legal/judicial terms and courtroom framing strictly banned.
 5. REAL-TIME OMNISCIENT ACTION: Every single event must keep its action-driven, real-time momentum. 
 
 You must return the corrected outline AND a detailed narrative response explaining what you changed and why, in accordance with the user's feedback.
@@ -1693,7 +2368,7 @@ YOUR OUTPUT MUST EXACTLY MATCH THIS JSON SCHEMA:
         model: "gemini-3.1-pro-preview",
         contents: { text: prompt },
         config: {
-          systemInstruction: "You are an expert Lead Story Architect and Forensic Narrative Refiner. Your goal is to process the user's custom correction instructions and surgically adapt the story sections in real-time. Follow the JSON schema strictly.",
+          systemInstruction: "You are a collaborative story editor and narrative helper. Your highest directive is to fully accept the user's instructions and modify the outline sections. If they want callbacks, flashbacks, structural changes, or other rule adjustments, do NOT tell them it is against the rules or argue. Simply listen to them, make the requested edits exactly, and respond with a warm, supportive explanation.",
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -1815,7 +2490,7 @@ YOUR OUTPUT MUST EXACTLY MATCH THIS JSON SCHEMA:
         CRITICAL RECONSTRUCTION PROTOCOLS (VIOLATION PREVENTIONS):
         1. ZERO COURTROOM OR ACTIVE TRIAL DRAMA SCENES: You are strictly forbidden from writing about active courtroom proceedings, lawyer debates, legal arguments, jury selections, witness courtroom testimonies, or legal depositions. However, standard character titles/professions (e.g., "attorney", "lawyer", "defense attorney", "prosecutor") and direct, simple final justice outcomes (e.g., "sentenced to life imprisonment", "guilty", "sentenced to thirty years in prison") folded only as direct chronological results at the very end are 100% permitted.
         2. ZERO PHONE RECORD INTERRUPTIONS / CELL TOWERS: Do not write about investigators checking cell phone mapping, cell tower pings, pulling phone records, or technical mobile location tracking. Describe what calls were made and character movements purely as direct, real-time actions of the characters.
-        3. FOCUS ON THE HEART OF THE STORY: Focus entirely on the characters' motivations, relationship dynamics, actions, and the emotional/physical developments of the events. Avoid dry technical descriptions, machine weights, or clinical statistics.
+        3. FOCUS ON THE HEART OF THE STORY: Focus entirely on the characters' motivations, relationship dynamics, actions, and the emotional developments of the events. Avoid dry technical descriptions, machine weights, or clinical statistics.
         4. PERFECT FULL-WORD DATES: Every single date, year, caliber, room number, and currency MUST be spelled out completely in words (e.g. "the fifth of March, nineteen ninety six", "eighty thousand dollars"). Never use numeric digits.
       `;
 
@@ -1823,7 +2498,7 @@ YOUR OUTPUT MUST EXACTLY MATCH THIS JSON SCHEMA:
         model: "gemini-3.1-pro-preview", 
         contents: { text: prompt },
         config: {
-          systemInstruction: NARRATION_PROTOCOL + "\n\nCRITICAL DATE RULE: You MUST write out all dates in full words. No digits for days or years. (e.g., 'the second of March, twenty twenty three').\n\nFLESH OUT MANDATE: Do NOT just repeat the outline. Use the research to build real, engaging scenes. If you just mirror the outline bullet points, you have failed.\n\nCRITICAL WORD SIMPLICITY MANDATE: You are strictly forbidden from using academic, formal, literary, or dramatic words. Make all sentences extremely simple and direct. Use basic everyday English that a twelve-year-old can easily understand. Break down all complex concepts (e.g., write 'ran out of money' instead of 'financial embarrassment').",
+          systemInstruction: NARRATION_PROTOCOL + "\n\nCRITICAL DATE RULE: You MUST write out all dates in full words. No digits for days or years. (e.g., 'the second of March, twenty twenty three').\n\nFLESH OUT MANDATE (STORYTELLING NOT OUTLINE-CONNECTING): Do NOT just take the outline bullet points and connect or repeat them. You must act as a true, suspenseful storyteller. Use each outline bullet event as a structural blueprint/prompt to write a fully-realized, detailed, scene paragraph. Each bullet MUST become a thick, engaging narrative scene of eighty to a hundred and fifty words, blending character reactions, movements, motivations, and the details from the research dossier to make the scene feel real. Slow down, build suspense, hook the reader's attention, and let each scene build organically rather than jumping robotically from bullet to bullet. If you just mirror the outline bullet points, you have failed.\n\nCRITICAL WORD SIMPLICITY MANDATE: You are strictly forbidden from using academic, formal, literary, or dramatic words. Make all sentences extremely simple and direct. Use basic everyday English that a twelve-year-old can easily understand. Break down all complex concepts (e.g., write 'ran out of money' instead of 'financial embarrassment').\n\nCRITICAL SENTENCE FLOW RULE: You MUST connect logically or chronologically related actions with natural connectors (e.g., 'and', 'then', 'after that') instead of writing choppy, staccato, isolated sentences. Stop being in a hurry to use full stops! For speech, do not repeat speech attributions like 'she said, she said'. Connect dialogues and reports into single, cohesive, flowing sentences.",
           temperature: 0.9, 
           topP: 0.95,
           safetySettings: STORY_SAFETY_SETTINGS
@@ -1983,7 +2658,7 @@ YOUR OUTPUT MUST EXACTLY MATCH THIS JSON SCHEMA:
         CRITICAL RECONSTRUCTION PROTOCOLS (VIOLATION PREVENTIONS):
         1. ZERO COURTROOM OR ACTIVE TRIAL DRAMA SCENES: You are strictly forbidden from writing about active courtroom proceedings, lawyer debates, legal arguments, jury selections, witness courtroom testimonies, or legal depositions. However, standard character titles/professions (e.g., "attorney", "lawyer", "defense attorney", "prosecutor") and direct, simple final justice outcomes (e.g., "sentenced to life imprisonment", "guilty", "sentenced to thirty years in prison") folded only as direct chronological results at the very end are 100% permitted.
         2. ZERO PHONE RECORD INTERRUPTIONS / CELL TOWERS: Do not write about investigators checking cell phone mapping, cell tower pings, pulling phone records, or technical mobile location tracking. Describe what calls were made and character movements purely as direct, real-time actions of the characters.
-        3. FOCUS ON THE HEART OF THE STORY: Focus entirely on the characters' motivations, relationship dynamics, actions, and the emotional/physical developments of the events. Avoid dry technical descriptions, machine weights, or clinical statistics.
+        3. FOCUS ON THE HEART OF THE STORY: Focus entirely on the characters' motivations, relationship dynamics, actions, and the emotional developments of the events. Avoid dry technical descriptions, machine weights, or clinical statistics.
         4. PERFECT FULL-WORD DATES: Every single date, year, caliber, room number, and currency MUST be spelled out completely in words. Never use numeric digits.
       `;
 
@@ -1991,7 +2666,7 @@ YOUR OUTPUT MUST EXACTLY MATCH THIS JSON SCHEMA:
         model: "gemini-3.1-pro-preview",
         contents: { text: prompt },
         config: {
-          systemInstruction: NARRATION_PROTOCOL + "\n\nCRITICAL DATE RULE: You MUST write out all dates in full words. No digits for days or years. (e.g., 'the second of March, twenty twenty three').\n\nFLESH OUT MANDATE: Do NOT just repeat the outline. Use the research to build real, engaging scenes. Also, apply zero-court, zero-cell-ping, and story-heart focus rules strictly.\n\nCRITICAL WORD SIMPLICITY MANDATE: You are strictly forbidden from using academic, formal, literary, or dramatic words. Make all sentences extremely simple and direct. Use basic everyday English that a twelve-year-old can easily understand. Break down all complex concepts (e.g., write 'ran out of money' instead of 'financial embarrassment').",
+          systemInstruction: NARRATION_PROTOCOL + "\n\nCRITICAL DATE RULE: You MUST write out all dates in full words. No digits for days or years. (e.g., 'the second of March, twenty twenty three').\n\nFLESH OUT MANDATE (STORYTELLING NOT OUTLINE-CONNECTING): Do NOT just take the outline bullet points and connect or repeat them. You must act as a true, suspenseful storyteller. Use each outline bullet event as a structural blueprint/prompt to write a fully-realized, detailed, scene paragraph. Each bullet MUST become a thick, engaging narrative scene of eighty to a hundred and fifty words, blending character reactions, movements, motivations, and the details from the research dossier to make the scene feel real. Slow down, build suspense, hook the reader's attention, and let each scene build organically rather than jumping robotically from bullet to bullet. Also, apply zero-court, zero-cell-ping, and story-heart focus rules strictly. If you just mirror the outline bullet points, you have failed.\n\nCRITICAL WORD SIMPLICITY MANDATE: You are strictly forbidden from using academic, formal, literary, or dramatic words. Make all sentences extremely simple and direct. Use basic everyday English that a twelve-year-old can easily understand. Break down all complex concepts (e.g., write 'ran out of money' instead of 'financial embarrassment').\n\nCRITICAL SENTENCE FLOW RULE: You MUST connect logically or chronologically related actions with natural connectors (e.g., 'and', 'then', 'after that') instead of writing choppy, staccato, isolated sentences. Stop being in a hurry to use full stops! For speech, do not repeat speech attributions like 'she said, she said'. Connect dialogues and reports into single, cohesive, flowing sentences.",
           temperature: 0.8,
           safetySettings: STORY_SAFETY_SETTINGS
         }
@@ -2556,7 +3231,7 @@ ${storyContextText.substring(0, 12000)}`
       const chat = ai.chats.create({
         model: "gemini-3.1-pro-preview",
         config: {
-          systemInstruction: RETELLING_PROTOCOL + "\n\nCRITICAL DATE RULE: You MUST write out all dates in full words. No digits for days or years. (e.g., 'the second of March, twenty twenty three').\n\nTOTAL DISRUPTION MANDATE: You MUST destroy the original sentence and structure. If you just swap words, you have failed. Maintain the exact sequence of events as they appear in the original text but use simple spoken words.",
+          systemInstruction: RETELLING_PROTOCOL + "\n\nCRITICAL DATE RULE: You MUST write out all dates in full words. No digits for days or years. (e.g., 'the second of March, twenty twenty three').\n\nTOTAL DISRUPTION MANDATE: You MUST destroy the original sentence and structure. If you just swap words, you have failed. Maintain the exact sequence of events as they appear in the original text but use simple spoken words.\n\nCRITICAL SENTENCE FLOW RULE: You MUST connect logically or chronologically related actions with natural connectors (e.g., 'and', 'then', 'after that') instead of writing choppy, staccato, isolated sentences. Stop being in a hurry to use full stops! For speech, do not repeat speech attributions like 'she said, she said'. Connect dialogues and reports into single, cohesive, flowing sentences.",
           temperature: 1,
         },
         history: chatHistory,
@@ -2724,7 +3399,7 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
   };
 
   const startNewStory = () => {
-    if (storySessions.length > 0) {
+    if (storySessions.length > 0 || sections.length > 0) {
       setIsConfirmingNewStory(true);
     } else {
       executeReset();
@@ -2732,13 +3407,59 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
   };
 
   const executeReset = () => {
+    setCaseTitle("");
+    setIsEditingCaseTitle(false);
+    // Retell Mode States
     setInputText("");
     setRetoldText("");
     setStorySessions([]);
     setChatHistory([]);
+    
+    // Outliner/Narrator Mode States
+    setSections([]);
+    setUncorrectedSections([]);
+    setSelectedOutlineType("corrected");
+    setCurrentNarratorStep("idle");
+    setNarratorChatHistory([]);
+    setOutlinePlan("");
+    setSuspenseDeclaration(null);
+    setViolationsAudit(null);
+    setReconstructedOutlineViolationsReport("");
+    setOutlineSource(null);
+    setMaxReachedStep("idle");
+    setOutlinerStrategy("hook");
+    setUserResearchText("");
+    setUserResearchFileName("");
+    setUserResearchSource("system");
+    setUserResearchFile(null);
+    setScratchResearchDossier("");
+    setOutlineViolations([]);
+    setCheckedViolationIds([]);
+    setSuspenseOptions([]);
+    setSelectedSuspenseOptionId("");
+    setSuspenseDialogue([]);
+    setCustomSuspenseBrief("");
+    setCustomCorrectionDialogue([]);
+    setCustomCorrectionUserText("");
+    setPlanningDialogue([]);
+    setPlanningUserText("");
+    setGapsReport("");
+    setDetectedGaps([]);
+    setCheckedGapIds([]);
+    setScratchTopic("");
+    setOutlineText("");
+    setOutlineFile(null);
+    setSectionResearchUploading({});
+    setIsCollectingBlueprint(false);
+    setScratchBlueprintText("");
+
     setError(null);
     setIsConfirmingNewStory(false);
+
+    // Clear persistent storage keys
     localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(NARRATOR_STORAGE_KEY);
+    
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -2854,6 +3575,82 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
           }
         </motion.p>
       </header>
+
+      {/* Active Case Heading Banner */}
+      {caseTitle && (mode === "outlining" || mode === "narrate") && (
+        <motion.div
+          initial={{ opacity: 0, y: -10 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-accent/5 border border-accent/20 rounded-[2rem] p-6 max-w-3xl mx-auto flex items-center justify-between gap-4 shadow-sm w-full animate-in fade-in"
+        >
+          <div className="flex items-center gap-4 flex-1 min-w-0 font-sans">
+            <div className="w-12 h-12 rounded-2xl bg-accent/10 flex items-center justify-center flex-shrink-0 text-accent">
+              <FolderOpen className="w-6 h-6" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-[10px] font-black uppercase tracking-widest text-[#d97706]/70">Active Project / Case</p>
+              {isEditingCaseTitle ? (
+                <div className="flex items-center gap-2 mt-1">
+                  <input
+                    type="text"
+                    id="case-title-input"
+                    className="text-lg md:text-xl font-serif font-bold text-warm-ink bg-white border border-accent/30 rounded-xl px-3 py-1 outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent w-full"
+                    value={tempCaseTitle}
+                    onChange={(e) => setTempCaseTitle(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        handleSaveCaseTitle();
+                      } else if (e.key === "Escape") {
+                        setIsEditingCaseTitle(false);
+                      }
+                    }}
+                    autoFocus
+                  />
+                </div>
+              ) : (
+                <h2 className="text-xl md:text-2xl font-serif font-bold text-warm-ink truncate leading-snug mt-0.5">
+                  {caseTitle}
+                </h2>
+              )}
+            </div>
+          </div>
+          
+          <div className="flex items-center gap-2 flex-shrink-0">
+            {isEditingCaseTitle ? (
+              <>
+                <button
+                  id="save-case-title-btn"
+                  onClick={handleSaveCaseTitle}
+                  className="p-3 bg-accent text-white rounded-full hover:scale-105 active:scale-95 transition-all cursor-pointer shadow-md shadow-accent/25"
+                  title="Save Title"
+                >
+                  <Check className="w-4 h-4" />
+                </button>
+                <button
+                  id="cancel-case-title-btn"
+                  onClick={() => setIsEditingCaseTitle(false)}
+                  className="p-3 bg-warm-ink/5 text-warm-ink/50 hover:bg-warm-ink/10 rounded-full transition-all cursor-pointer"
+                  title="Cancel"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </>
+            ) : (
+              <button
+                id="edit-case-title-btn"
+                onClick={() => {
+                  setTempCaseTitle(caseTitle);
+                  setIsEditingCaseTitle(true);
+                }}
+                className="p-3 hover:bg-accent/10 text-accent rounded-full transition-all cursor-pointer"
+                title="Rename Case"
+              >
+                <Edit3 className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+        </motion.div>
+      )}
 
       <main className="grid grid-cols-1 gap-12">
         <AnimatePresence mode="wait">
@@ -3216,7 +4013,17 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                               }`}
                             >
                               <span className="opacity-40 mr-1.5">{idx + 1}.</span>
-                              {step}
+                              {step === "idle" ? "Upload" :
+                               step === "parsed" ? "Parse" :
+                               step === "researched" ? "Research" :
+                               step === "suspensed" ? "Suspense" :
+                               step === "planned" ? "Plan" :
+                               step === "detected" ? "Audit" :
+                               step === "gaps" ? "Gaps" :
+                               step === "refined" ? "Reconstruct" :
+                               step === "doublechecked" ? "Vetting" :
+                               step === "corrected" ? "Purged" :
+                               step}
                             </button>
                             {idx < steps.length - 1 && (
                               <ChevronRight className="w-3 h-3 text-accent/40" />
@@ -3284,6 +4091,13 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                         >
                           <Copy className="w-4 h-4" />
                           {mode === "outlining" ? "Copy Outline" : "Copy Narrative"}
+                        </button>
+                        <button 
+                          onClick={startNewStory}
+                          className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest bg-amber-500/10 hover:bg-amber-500/20 text-amber-900 border border-amber-500/20 px-6 py-3 rounded-full hover:scale-105 active:scale-95 transition-all shadow-sm cursor-pointer"
+                        >
+                          <PlusCircle className="w-4 h-4 text-amber-700" />
+                          New Case / Reset
                         </button>
                       </div>
                     </div>
@@ -3556,6 +4370,7 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                                       if (!file) return;
                                       setUserResearchFileName(file.name);
                                       if (file.type === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+                                        setNarratorIsProcessing(true);
                                         try {
                                           const arrayBuffer = await file.arrayBuffer();
                                           const result = await mammoth.extractRawText({ arrayBuffer });
@@ -3564,17 +4379,40 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                                           confetti({ particleCount: 20, colors: ["#059669"] });
                                         } catch (err) {
                                           setError("Failed to extract Word document research. Please copy & paste directly.");
+                                        } finally {
+                                          setNarratorIsProcessing(false);
                                         }
                                       } else if (file.type === "application/pdf") {
+                                        setNarratorIsProcessing(true);
                                         const reader = new FileReader();
-                                        reader.onload = (ev) => {
-                                          const base64 = ev.target?.result as string;
-                                          setUserResearchFile({
-                                            data: base64.split(",")[1],
-                                            mimeType: file.type
-                                          });
-                                          setUserResearchText(""); // Clear text since we are passing the PDF file directly to Gemini
-                                          confetti({ particleCount: 20, colors: ["#059669"] });
+                                        reader.onload = async (ev) => {
+                                          try {
+                                            const base64 = ev.target?.result as string;
+                                            const base64Data = base64.split(",")[1];
+                                            const response = await ai.models.generateContent({
+                                              model: "gemini-3.1-pro-preview",
+                                              contents: {
+                                                parts: [
+                                                  {
+                                                    inlineData: {
+                                                      data: base64Data,
+                                                      mimeType: "application/pdf"
+                                                    }
+                                                  },
+                                                  { text: "Convert the entire content of the uploaded PDF into an extremely detailed, comprehensive text/Markdown document. Extract and transcribe everything, including all timelines, quotes, names, facts, and details, without summarizing, omitting, or selecting any portion. Return ONLY the complete transcribed text." }
+                                                ]
+                                              }
+                                            });
+                                            const text = response.text || "";
+                                            setUserResearchText(text);
+                                            setUserResearchFile(null);
+                                            confetti({ particleCount: 20, colors: ["#059669"] });
+                                          } catch (err) {
+                                            console.error(err);
+                                            setError("Failed to parse and extract text from the PDF. You can try copying and pasting it directly.");
+                                          } finally {
+                                            setNarratorIsProcessing(false);
+                                          }
                                         };
                                         reader.readAsDataURL(file);
                                       } else {
@@ -3648,7 +4486,7 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                       </div>
                     )}
 
-                    {currentNarratorStep === "researched" && mode === "outlining" && (
+                    {currentNarratorStep === "researched" && mode === "outlining" && !isCollectingBlueprint && (
                       <div className="pt-6 border-t border-warm-ink/5 flex flex-col gap-4">
                         <button
                           onClick={() => handleDetectSuspense(sections)}
@@ -3672,7 +4510,7 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                       </div>
                     )}
 
-                    {currentNarratorStep === "suspensed" && mode === "outlining" && (
+                    {currentNarratorStep === "suspensed" && mode === "outlining" && !isCollectingBlueprint && (
                       <div className="space-y-8 pt-10 border-t border-warm-ink/5">
                         <div className="bg-blue-500/5 border border-blue-500/10 rounded-3xl p-6 flex items-start gap-4 mb-4">
                           <div className="p-3 bg-blue-500/10 text-blue-600 rounded-2xl">
@@ -3703,19 +4541,45 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                                         : "bg-white border-warm-ink/5 hover:border-warm-ink/10"
                                     }`}
                                   >
-                                    <div className="flex items-start justify-between">
-                                      <div className="space-y-1">
-                                        <h6 className="font-serif font-bold text-base text-warm-ink flex items-center gap-2">
-                                          {opt.title}
-                                        </h6>
-                                        <p className="text-xs text-warm-ink/65 leading-relaxed font-sans">
-                                          {opt.description}
-                                        </p>
+                                    <div className="flex items-start justify-between gap-4">
+                                      <div className="space-y-2 flex-1">
+                                        <EditableText
+                                          label="Strategy Title"
+                                          value={opt.title}
+                                          onChange={(v) => {
+                                            setSuspenseOptions(prev => prev.map(o => o.id === opt.id ? { ...o, title: v } : o));
+                                          }}
+                                          className="font-serif font-bold text-base text-warm-ink"
+                                        />
+                                        <EditableText
+                                          label="Description"
+                                          value={opt.description}
+                                          onChange={(v) => {
+                                            setSuspenseOptions(prev => prev.map(o => o.id === opt.id ? { ...o, description: v } : o));
+                                          }}
+                                          multiline
+                                          className="text-xs text-warm-ink/65 leading-relaxed font-sans"
+                                        />
                                       </div>
-                                      <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all ${
-                                        isSelected ? "border-blue-500 bg-blue-500 text-white" : "border-warm-ink/20"
-                                      }`}>
-                                        {isSelected && <CheckCircle2 className="w-3.5 h-3.5" />}
+                                      <div className="flex items-center gap-2">
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            const textToCopy = `**Suspense Strategy: ${opt.title}**\nDescription: ${opt.description}\nWithheld/Rule: ${opt.preservationRule}\nPros:\n${opt.pros.map(p => `- ${p}`).join("\n")}\nCons:\n${opt.cons.map(c => `- ${c}`).join("\n")}`;
+                                            navigator.clipboard.writeText(textToCopy);
+                                            confetti({ particleCount: 20, spread: 35, colors: ["#3b82f6"] });
+                                          }}
+                                          className="p-1.5 px-2.5 bg-neutral-150 hover:bg-neutral-200 text-neutral-700 rounded-lg text-[10px] font-bold uppercase flex items-center gap-1 transition-all border border-neutral-200 hover:scale-105 active:scale-95 cursor-pointer"
+                                          title="Copy Strategy"
+                                        >
+                                          <Copy className="w-3 h-3 text-neutral-500" />
+                                          <span>Copy</span>
+                                        </button>
+                                        <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center transition-all ${
+                                          isSelected ? "border-blue-500 bg-blue-500 text-white" : "border-warm-ink/20"
+                                        }`}>
+                                          {isSelected && <CheckCircle2 className="w-3.5 h-3.5" />}
+                                        </div>
                                       </div>
                                     </div>
 
@@ -3723,21 +4587,43 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                                     <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-4 border-t border-warm-ink/5 text-[11px]">
                                       <div className="space-y-1 bg-emerald-50/50 rounded-xl p-3 border border-emerald-100/50">
                                         <div className="font-extrabold uppercase text-emerald-800 tracking-wider font-sans mb-1">Pros / Strengths:</div>
-                                        {opt.pros.map((p, i) => (
-                                          <div key={i} className="text-emerald-950 font-sans leading-tight">• {p}</div>
-                                        ))}
+                                        <EditableText
+                                          label="Pros (one per line)"
+                                          value={opt.pros.join("\n")}
+                                          onChange={(v) => {
+                                            const lines = v.split("\n").map(l => l.trim()).filter(Boolean);
+                                            setSuspenseOptions(prev => prev.map(o => o.id === opt.id ? { ...o, pros: lines } : o));
+                                          }}
+                                          multiline
+                                          className="text-xs transition-all font-sans leading-tight"
+                                        />
                                       </div>
                                       <div className="space-y-1 bg-red-50/50 rounded-xl p-3 border border-red-100/50">
                                         <div className="font-extrabold uppercase text-red-800 tracking-wider font-sans mb-1">Cons / Risks:</div>
-                                        {opt.cons.map((c, i) => (
-                                          <div key={i} className="text-red-950 font-sans leading-tight">• {c}</div>
-                                        ))}
+                                        <EditableText
+                                          label="Cons (one per line)"
+                                          value={opt.cons.join("\n")}
+                                          onChange={(v) => {
+                                            const lines = v.split("\n").map(l => l.trim()).filter(Boolean);
+                                            setSuspenseOptions(prev => prev.map(o => o.id === opt.id ? { ...o, cons: lines } : o));
+                                          }}
+                                          multiline
+                                          className="text-xs transition-all font-sans leading-tight"
+                                        />
                                       </div>
                                     </div>
 
                                     <div className="mt-3 text-[11px] bg-neutral-50 rounded-xl p-3 border border-neutral-150 leading-relaxed text-neutral-700">
                                       <strong className="text-neutral-900 block font-sans uppercase text-[9px] tracking-widest font-extrabold mb-1">Rule/Withheld:</strong>
-                                      {opt.preservationRule}
+                                      <EditableText
+                                        label="Rule / Withheld"
+                                        value={opt.preservationRule}
+                                        onChange={(v) => {
+                                          setSuspenseOptions(prev => prev.map(o => o.id === opt.id ? { ...o, preservationRule: v } : o));
+                                        }}
+                                        multiline
+                                        className="text-xs text-neutral-800 leading-relaxed font-sans"
+                                      />
                                     </div>
                                   </div>
                                 );
@@ -3746,13 +4632,30 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
 
                             {customSuspenseBrief && (
                               <div className="bg-amber-50/50 border border-amber-200/50 rounded-2xl p-5 space-y-2">
-                                <h6 className="text-[10px] font-black uppercase tracking-widest text-amber-900 font-sans flex items-center gap-1.5">
-                                  <Sparkles className="w-4 h-4 text-amber-600 animate-pulse" />
-                                  Active Alignment Strategy Brief (Refined)
-                                </h6>
-                                <p className="text-xs text-amber-950 leading-relaxed font-sans whitespace-pre-line">
-                                  {customSuspenseBrief}
-                                </p>
+                                <div className="flex items-start justify-between gap-4">
+                                  <h6 className="text-[10px] font-black uppercase tracking-widest text-amber-900 font-sans flex items-center gap-1.5">
+                                    <Sparkles className="w-4 h-4 text-amber-600 animate-pulse" />
+                                    Active Alignment Strategy Brief (Refined)
+                                  </h6>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      navigator.clipboard.writeText(customSuspenseBrief);
+                                      confetti({ particleCount: 15, spread: 20, colors: ["#d97706"] });
+                                    }}
+                                    className="p-1 px-2.5 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded-lg text-[10px] font-bold uppercase flex items-center gap-1 border border-amber-200 hover:scale-105 active:scale-95 transition-all cursor-pointer"
+                                  >
+                                    <Copy className="w-3 h-3 text-amber-700" />
+                                    <span>Copy</span>
+                                  </button>
+                                </div>
+                                <EditableText
+                                  label="Active Alignment Strategy Brief"
+                                  value={customSuspenseBrief}
+                                  onChange={(v) => setCustomSuspenseBrief(v)}
+                                  multiline
+                                  className="text-xs text-amber-950 leading-relaxed font-sans"
+                                />
                               </div>
                             )}
                           </div>
@@ -3834,41 +4737,191 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                       </div>
                     )}
 
-                    {currentNarratorStep === "planned" && mode === "outlining" && (
-                      <div className="space-y-8 pt-10 border-t border-warm-ink/5">
-                        <div className="bg-warm-bg border-2 border-accent/20 rounded-3xl p-8 space-y-6">
-                          <div className="flex items-center gap-3 text-accent transition-all">
-                            <FileText className="w-6 h-6" />
-                            <h4 className="text-sm font-black uppercase tracking-widest text-accent">Internal Planning Document</h4>
+                    {isCollectingBlueprint && (
+                      <div className="space-y-8 pt-10 border-t-2 border-emerald-500/20 animate-in fade-in slide-in-from-bottom duration-300">
+                        <div className="bg-emerald-50/50 border border-emerald-500/20 rounded-3xl p-6 flex items-start gap-4">
+                          <div className="p-3 bg-emerald-500/10 text-emerald-600 rounded-2xl">
+                            <Sparkles className="w-6 h-6" />
                           </div>
-                          
-                          <EditableText 
-                            label="Planning Document" 
-                            value={outlinePlan} 
-                            onChange={setOutlinePlan}
-                            multiline
-                            markdown
-                          />
+                          <div className="space-y-1">
+                            <h4 className="text-sm font-black uppercase tracking-widest text-emerald-950 font-sans">Optional: Propose Your Own Outline Blueprint</h4>
+                            <p className="text-[11px] text-warm-ink/70 leading-relaxed font-sans">
+                              Since you are skipping the suspense phase, you can optionally provide your own specific ideas or a rough blueprint of how you want the sections of the outline to be structured. The Story Consultant will analyze your structure and plan towards it. If you don't have a specific blueprint in mind, you can skip this step and let the AI generate a standard forensic structural plan.
+                            </p>
+                          </div>
                         </div>
 
-                        <div className="flex flex-col gap-4">
-                          <button
-                            onClick={() => handleDetectViolations(sections)}
-                            disabled={narratorIsProcessing}
-                            className="w-full bg-accent text-white py-6 rounded-3xl font-bold flex items-center justify-center gap-4 hover:scale-[1.02] active:scale-[0.98] transition-all shadow-xl shadow-accent/20"
-                          >
-                            {narratorIsProcessing ? <Loader2 className="w-6 h-6 animate-spin" /> : <AlertCircle className="w-6 h-6" />}
-                            <div className="text-left">
-                              <span className="block text-sm uppercase tracking-widest font-black">Step 4: Violation Audit</span>
-                              <span className="block text-xs font-normal opacity-80">Detect structural overlaps, repetition, and factual errors.</span>
+                        <div className="bg-white border border-warm-ink/10 rounded-[2rem] p-6 space-y-4">
+                          <label className="block text-xs font-black uppercase tracking-widest text-warm-ink/60">
+                            Your Proposed Outline Structure / Ideas (Optional)
+                          </label>
+                          <textarea
+                            value={scratchBlueprintText}
+                            onChange={(e) => setScratchBlueprintText(e.target.value)}
+                            placeholder="e.g., Section 1: Early life & background of the suspect&#10;Section 2: The night of the towing and car breakdown&#10;Section 3: The discovery of forensic clues & final timeline..."
+                            className="w-full h-44 text-sm p-4 bg-warm-bg/30 border border-warm-ink/10 rounded-2xl focus:border-accent focus:bg-white outline-none font-sans resize-y leading-relaxed"
+                          />
+
+                          <div className="flex flex-wrap items-center justify-between gap-4 pt-2">
+                            <button
+                              onClick={() => {
+                                setIsCollectingBlueprint(false);
+                                setScratchBlueprintText("");
+                              }}
+                              className="px-5 py-2.5 bg-neutral-100 hover:bg-neutral-150 text-neutral-600 rounded-xl text-xs font-bold uppercase transition"
+                            >
+                              Cancel
+                            </button>
+                            <div className="flex items-center gap-2">
+                              <button
+                                onClick={async () => {
+                                  setIsCollectingBlueprint(false);
+                                  await handlePlanOutline(sections, true, "");
+                                }}
+                                disabled={narratorIsProcessing}
+                                className="px-5 py-2.5 bg-neutral-150 hover:bg-neutral-200 text-neutral-800 rounded-xl text-xs font-bold uppercase transition border border-neutral-200 flex items-center gap-2"
+                              >
+                                {narratorIsProcessing && <Loader2 className="w-3 h-3 animate-spin" />}
+                                Use AI Standard Planning
+                              </button>
+                              <button
+                                onClick={async () => {
+                                  setIsCollectingBlueprint(false);
+                                  await handlePlanOutline(sections, true, scratchBlueprintText);
+                                }}
+                                disabled={narratorIsProcessing}
+                                className="px-6 py-3 bg-accent text-white hover:bg-accent/90 rounded-xl text-xs font-bold uppercase tracking-wider transition-all flex items-center gap-2 font-sans shadow-lg shadow-accent/25"
+                              >
+                                {narratorIsProcessing && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                                Run Planning with My Blueprint
+                              </button>
                             </div>
-                          </button>
-                          <button
-                            onClick={goForward}
-                            className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline cursor-pointer"
-                          >
-                            Skip to Conflict Detection →
-                          </button>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {currentNarratorStep === "planned" && mode === "outlining" && (
+                      <div className="space-y-8 pt-10 border-t border-warm-ink/5">
+                        <div className="bg-orange-500/5 border border-orange-500/10 rounded-3xl p-6 flex items-start gap-4 mb-4">
+                          <div className="p-3 bg-orange-500/10 text-orange-600 rounded-2xl">
+                            <Sparkles className="w-6 h-6 animate-pulse" />
+                          </div>
+                          <div className="space-y-1">
+                            <h4 className="text-sm font-black uppercase tracking-widest text-orange-950 font-sans font-black">Interactive Forensic Planning</h4>
+                            <p className="text-[11px] text-warm-ink/60 leading-relaxed font-sans">
+                              Review your detailed internal planning document below. Type structural ideas, suggest section divisions, add clues to emphasize, or iterate on the pacing directly with your Story Consultant.
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+                          {/* Left Panel: Plan Details */}
+                          <div className="lg:col-span-7 space-y-6 animate-in fade-in slide-in-from-bottom duration-300">
+                            <h5 className="text-[10px] font-black uppercase tracking-widest text-warm-ink/50 mb-2 font-sans">Internal Planning Document</h5>
+                            
+                            <div className="bg-warm-bg border-2 border-accent/20 rounded-3xl p-8 space-y-6">
+                              <div className="flex items-center gap-3 text-accent transition-all">
+                                <FileText className="w-6 h-6" />
+                                <h4 className="text-sm font-black uppercase tracking-widest text-accent">Active Structure Report</h4>
+                              </div>
+                              
+                              <EditableText 
+                                label="Planning Document" 
+                                value={outlinePlan} 
+                                onChange={setOutlinePlan}
+                                multiline
+                                markdown
+                              />
+                            </div>
+
+                            <div className="flex flex-col gap-4 font-sans">
+                              <button
+                                onClick={() => handleDetectViolations(sections)}
+                                disabled={narratorIsProcessing}
+                                className="w-full bg-accent text-white py-6 rounded-3xl font-bold flex items-center justify-center gap-4 hover:scale-[1.02] active:scale-[0.98] transition-all shadow-xl shadow-accent/20 cursor-pointer"
+                              >
+                                {narratorIsProcessing ? <Loader2 className="w-6 h-6 animate-spin" /> : <AlertCircle className="w-6 h-6" />}
+                                <div className="text-left">
+                                  <span className="block text-sm uppercase tracking-widest font-black">Step 4: Violation Audit</span>
+                                  <span className="block text-xs font-normal opacity-80">Detect structural overlaps, repetition, and factual errors.</span>
+                                </div>
+                              </button>
+                              <button
+                                onClick={goForward}
+                                className="text-xs font-bold uppercase tracking-widest text-accent text-center py-2 hover:underline cursor-pointer"
+                              >
+                                Skip to Conflict Detection →
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Right Panel: Interactive Discussion */}
+                          <div className="lg:col-span-5 flex flex-col bg-white border border-warm-ink/10 rounded-3xl h-[600px] overflow-hidden shadow-sm">
+                            <div className="p-5 border-b border-warm-ink/5 bg-neutral-50/50 flex items-center justify-between">
+                              <h5 className="text-[10px] font-black uppercase tracking-widest text-neutral-700 font-sans font-black">Planning Advisor Chat</h5>
+                              <span className="w-2.5 h-2.5 rounded-full bg-orange-500 animate-ping" />
+                            </div>
+
+                            {/* Chat history list */}
+                            <div className="flex-1 overflow-y-auto p-5 space-y-4 font-sans text-xs">
+                              {planningDialogue.length === 0 ? (
+                                <div className="h-full flex flex-col items-center justify-center text-center p-6 text-neutral-500 space-y-2">
+                                  <FileText className="w-8 h-8 text-neutral-300 stroke-[1.5]" />
+                                  <p className="font-medium text-xs text-neutral-500">No suggestions sent yet.</p>
+                                  <p className="text-[11px] leading-relaxed max-w-xs text-neutral-400">
+                                    Type a structural or timeline suggestion in the chat below to re-plan the pacing with your advisor!
+                                  </p>
+                                </div>
+                              ) : (
+                                planningDialogue.map((msg, idx) => {
+                                  const isUser = msg.role === "user";
+                                  return (
+                                    <div key={idx} className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
+                                      <div className={`p-4 rounded-2xl max-w-[85%] leading-relaxed ${
+                                        isUser 
+                                          ? "bg-warm-ink text-warm-bg rounded-br-none" 
+                                          : "bg-neutral-100 text-neutral-800 rounded-bl-none"
+                                      }`}>
+                                        <p className="whitespace-pre-wrap">{msg.parts?.[0]?.text || ""}</p>
+                                      </div>
+                                    </div>
+                                  );
+                                })
+                              )}
+                            </div>
+
+                            {/* Input box */}
+                            <div className="p-4 border-t border-warm-ink/5 bg-neutral-50/50 space-y-3">
+                              <div className="flex gap-2">
+                                <textarea
+                                  value={planningUserText}
+                                  onChange={(e) => setPlanningUserText(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === "Enter" && !e.shiftKey && planningUserText.trim() && !narratorIsProcessing) {
+                                      e.preventDefault();
+                                      handleSendPlanningMessage();
+                                    }
+                                  }}
+                                  placeholder="Type structural suggestions (e.g., 'divide Section 2 into two phases', 'add details about...') to re-plan..."
+                                  disabled={narratorIsProcessing}
+                                  className="flex-1 px-4 py-3 bg-white border border-warm-ink/10 rounded-xl text-xs font-sans placeholder-neutral-400 focus:outline-none focus:ring-1 focus:ring-orange-500 min-h-[60px] resize"
+                                  style={{ maxHeight: "300px" }}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={handleSendPlanningMessage}
+                                  disabled={narratorIsProcessing || !planningUserText.trim()}
+                                  className="bg-orange-600 hover:bg-orange-700 disabled:opacity-40 text-white px-5 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center transition-all cursor-pointer active:scale-95 flex-shrink-0"
+                                >
+                                  {narratorIsProcessing ? <Loader2 className="w-5 h-5 animate-spin" /> : "Send"}
+                                </button>
+                              </div>
+                              <p className="text-[9px] text-neutral-400 font-sans text-center leading-tight">
+                                Suggest any narrative adjustments. The Story Architect will revise and rebuild the entire planning document back based on your feedback.
+                              </p>
+                            </div>
+                          </div>
                         </div>
                       </div>
                     )}
@@ -3909,6 +4962,217 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                             Skip to Final Outline →
                           </button>
                         </div>
+                      </div>
+                    )}
+
+                    {currentNarratorStep === "gaps" && mode === "outlining" && (
+                      <div id="gap-detection-container" className="space-y-8 pt-10 border-t border-warm-ink/5 animate-fade-in">
+                        <div className="bg-amber-500/5 border-2 border-amber-500/15 rounded-3xl p-8 space-y-4">
+                          <div className="flex items-center gap-3 text-amber-800">
+                            <Sparkles className="w-6 h-6 animate-pulse" />
+                            <h4 id="gap-phase-title" className="text-sm font-black uppercase tracking-widest text-amber-950 font-sans">Step 5a: Gap Detection Phase</h4>
+                          </div>
+                          <p className="text-xs text-warm-ink/70 leading-relaxed font-sans">
+                            Our primary goal is complete narrative fidelity. In this phase, we analyze the deep research dossiers against our newly reconstructed outline to locate skipped milestones or omitted details, while **strictly honoring active suspense bounds** (never leaking withheld details prematurely).
+                          </p>
+                        </div>
+
+                        {detectedGaps.length === 0 ? (
+                          <div className="space-y-6">
+                            <div className="bg-warm-ink/5 border border-warm-ink/10 rounded-3xl p-8 text-center space-y-4">
+                              <Search className="w-10 h-10 text-warm-ink/40 mx-auto" />
+                              <h5 className="text-xs font-black uppercase tracking-widest text-warm-ink">No gaps loaded yet</h5>
+                              <p className="text-xs text-warm-ink/60 max-w-md mx-auto leading-relaxed font-sans">
+                                Let the Historical Gap Analyst compare the reconstructed story against the full dossier research. We will locate facts that are missing and propose precise, chronological prose to fill the gaps in context.
+                              </p>
+                              
+                              <button
+                                id="btn-run-gap-detect"
+                                onClick={() => handleDetectGaps(sections)}
+                                disabled={narratorIsProcessing}
+                                className="mx-auto px-6 py-3.5 bg-warm-ink text-warm-bg hover:scale-[1.02] active:scale-[0.98] transition-all rounded-2xl font-bold uppercase tracking-wider text-xs flex items-center gap-2 cursor-pointer"
+                              >
+                                {narratorIsProcessing ? (
+                                  <>
+                                    <Loader2 className="w-4 h-4 animate-spin" />
+                                    Analyzing & Match-checking...
+                                  </>
+                                ) : (
+                                  <>
+                                    <Search className="w-4 h-4" />
+                                    Scan Research for Missing Gaps &amp; Details
+                                  </>
+                                )}
+                              </button>
+                            </div>
+                            
+                            <div className="text-center font-sans">
+                              <button
+                                onClick={() => setCurrentNarratorStep("refined")}
+                                className="text-xs font-bold uppercase tracking-widest text-accent hover:underline cursor-pointer"
+                              >
+                                Skip Gap Detection &amp; Proceed to Refined View →
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="space-y-8 animate-fadeIn">
+                            <div className="space-y-6">
+                              <div className="flex items-center justify-between pb-2 border-b border-warm-ink/10">
+                                <span className="text-xs font-black uppercase tracking-widest text-warm-ink">Detected Gaps &amp; Missing Chronological Details</span>
+                                <span className="text-[10px] font-black uppercase tracking-widest bg-accent-tag text-accent px-3 py-1 rounded-full border border-accent/10">
+                                  {detectedGaps.length} Missing Details Found
+                                </span>
+                              </div>
+
+                              <div className="flex items-center justify-between bg-warm-ink/5 p-4 rounded-2xl border border-warm-ink/10">
+                                <div>
+                                  <h5 className="text-[11px] font-black uppercase tracking-widest text-warm-ink">Inclusions Selector</h5>
+                                  <p className="text-[11px] text-warm-ink/50 font-sans font-medium">Toggle which missing details you want injected into the outline.</p>
+                                </div>
+                                <div className="flex gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setCheckedGapIds(detectedGaps.map(g => g.id))}
+                                    className="text-[10px] font-bold uppercase tracking-wider bg-white border border-warm-ink/10 text-warm-ink/70 hover:bg-warm-ink/5 px-2.5 py-1.5 rounded-lg transition-all cursor-pointer"
+                                  >
+                                    Select All
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setCheckedGapIds([])}
+                                    className="text-[10px] font-bold uppercase tracking-wider bg-white border border-warm-ink/10 text-warm-ink/70 hover:bg-warm-ink/5 px-2.5 py-1.5 rounded-lg transition-all cursor-pointer"
+                                  >
+                                    Unselect All
+                                  </button>
+                                </div>
+                              </div>
+
+                              <div className="space-y-4 max-h-[500px] overflow-y-auto pr-2">
+                                {detectedGaps.map((gap) => {
+                                  const isChecked = checkedGapIds.includes(gap.id);
+                                  const section = sections.find(s => s.sectionNumber === gap.sectionNumber);
+                                  const sectionTitle = section ? section.title : `Section ${gap.sectionNumber}`;
+
+                                  return (
+                                    <div 
+                                      key={gap.id} 
+                                      className={`p-6 rounded-2xl border transition-all ${
+                                        isChecked 
+                                          ? 'bg-amber-500/[0.02] border-amber-500/20 shadow-sm' 
+                                          : 'bg-white border-warm-ink/5 opacity-60'
+                                      }`}
+                                    >
+                                      <div className="flex items-start gap-4">
+                                        <input
+                                          type="checkbox"
+                                          id={gap.id}
+                                          checked={isChecked}
+                                          onChange={(e) => {
+                                            if (e.target.checked) {
+                                              setCheckedGapIds(prev => [...prev, gap.id]);
+                                            } else {
+                                              setCheckedGapIds(prev => prev.filter(id => id !== gap.id));
+                                            }
+                                          }}
+                                          className="mt-1-5 w-4 h-4 rounded border-warm-ink/20 text-amber-600 focus:ring-amber-500 cursor-pointer"
+                                        />
+                                        <div className="flex-1 space-y-3">
+                                          <div className="flex flex-wrap items-center gap-2 justify-between">
+                                            <div className="space-y-0.5">
+                                              <span className="text-[10px] font-black uppercase tracking-widest text-warm-ink/40">Section {gap.sectionNumber}</span>
+                                              <h6 className="text-xs font-bold text-warm-ink">{sectionTitle}</h6>
+                                            </div>
+                                            <span className="text-[9px] font-black uppercase tracking-widest bg-amber-100 text-amber-800 px-2 py-0.5 rounded-full border border-amber-200/50 font-bold">
+                                              {gap.howToApply === "existing" ? "REPLACE/ENRICH EXISTING BULLET" : "INSERT NEW STANDALONE BULLET"}
+                                            </span>
+                                          </div>
+
+                                          <div className="p-3 bg-neutral-50 rounded-xl border border-warm-ink/5 space-y-1">
+                                            <span className="text-[9px] font-black uppercase tracking-widest text-neutral-400 block font-bold">Omission Detail Detected</span>
+                                            <p className="text-xs text-warm-ink font-sans leading-relaxed">{gap.gapDescription}</p>
+                                          </div>
+
+                                          <div className="p-3 bg-neutral-50 rounded-xl border border-warm-ink/5 space-y-1">
+                                            <span className="text-[9px] font-black uppercase tracking-widest text-neutral-400 block font-bold">Chronological Timeline Placement</span>
+                                            <p className="text-xs text-warm-ink font-mono leading-relaxed">{gap.chronologicalPosition}</p>
+                                          </div>
+
+                                          <div className="space-y-1.5 pt-1.55">
+                                            <label className="text-[9px] font-black uppercase tracking-widest text-emerald-600 font-bold font-sans flex items-center gap-1">
+                                              <Edit3 className="w-2.5 h-2.5" /> Verbatim Narrative Injection Prose (Editable)
+                                            </label>
+                                            <div className="bg-emerald-500/[0.02] border border-emerald-500/10 p-4 rounded-xl">
+                                              <textarea
+                                                id={`gap-prose-${gap.id}`}
+                                                value={gap.proposedCorrection}
+                                                onChange={(e) => {
+                                                  const newVal = e.target.value;
+                                                  setDetectedGaps(prev => prev.map(g => g.id === gap.id ? { ...g, proposedCorrection: newVal } : g));
+                                                }}
+                                                className="w-full text-xs font-sans leading-relaxed text-emerald-950 font-medium bg-transparent border-none p-0 focus:outline-none focus:ring-0 focus:border-none resize-y min-h-[90px] text-left"
+                                                placeholder="Clarify injected bullet points here..."
+                                              />
+                                            </div>
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+
+                            {/* Audit analysis log */}
+                            <div className="border border-warm-ink/10 rounded-3xl overflow-hidden p-6 bg-amber-50/20 space-y-4">
+                              <div className="flex items-center gap-3 text-warm-ink">
+                                <FileText className="w-5 h-5 text-amber-700" />
+                                <h5 className="text-[11px] font-black uppercase tracking-widest">Gap Audit Historical Report Logs</h5>
+                              </div>
+                              <div className="pt-4 border-t border-warm-ink/10">
+                                <EditableText 
+                                  label="Archival Completeness Analysis" 
+                                  value={gapsReport} 
+                                  onChange={setGapsReport}
+                                  multiline
+                                  markdown
+                                />
+                              </div>
+                            </div>
+
+                            <div className="flex flex-col gap-4">
+                              <button
+                                id="btn-inject-gaps"
+                                onClick={() => handleInjectGaps(sections)}
+                                disabled={narratorIsProcessing}
+                                className="w-full bg-emerald-600 hover:bg-emerald-700 text-white py-6 rounded-3xl font-bold flex items-center justify-center gap-4 hover:scale-[1.02] active:scale-[0.98] transition-all shadow-xl shadow-emerald-400/20 cursor-pointer"
+                              >
+                                {narratorIsProcessing ? <Loader2 className="w-6 h-6 animate-spin" /> : <PenTool className="w-6 h-6" />}
+                                <div className="text-left">
+                                  <span className="block text-sm uppercase tracking-widest font-black">Step 5b: Inject Missing Details &amp; Finalize Reconstruction</span>
+                                  <span className="block text-xs font-normal opacity-90">Inject the selected checked occurrences surgically into their respective section chronologies.</span>
+                                </div>
+                              </button>
+
+                              <div className="flex items-center justify-between px-2">
+                                <button
+                                  id="btn-rescan-gaps"
+                                  onClick={() => handleDetectGaps(sections)}
+                                  disabled={narratorIsProcessing}
+                                  className="text-xs font-bold uppercase tracking-widest text-neutral-500 hover:text-neutral-800 disabled:opacity-40 transition-all cursor-pointer"
+                                >
+                                  Re-Scan For Gaps
+                                </button>
+                                <button
+                                  onClick={() => setCurrentNarratorStep("refined")}
+                                  className="text-xs font-bold uppercase tracking-widest text-accent hover:underline cursor-pointer"
+                                >
+                                  Skip to Finalized View →
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -4638,34 +5902,74 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                         </div>
 
                         {/* Research Brief Dropdown */}
-                        {section.researchBrief && (
-                          <div className="bg-accent/[0.03] border border-accent/10 rounded-3xl p-6 text-sm text-warm-ink/60 font-sans leading-relaxed">
-                            <h5 className="text-[10px] font-bold uppercase tracking-widest text-accent flex items-center justify-between group-hover:text-accent/80 transition-colors">
-                               <span className="flex items-center gap-2">
-                                {researchingIndex === idx ? <Loader2 className="w-3 h-3 animate-spin" /> : <Search className="w-3 h-3" />}
-                                Research Brief
-                               </span>
-                               <button 
-                                 onClick={(e) => {
-                                   e.stopPropagation();
-                                   setCollapsedResearch(prev => ({ ...prev, [section.id]: !prev[section.id] }));
-                                 }}
-                                 className="p-1 hover:bg-accent/10 rounded-md transition-colors"
-                               >
-                                 {collapsedResearch[section.id] ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
-                               </button>
-                             </h5>
-                             {!collapsedResearch[section.id] && (
-                               <motion.div 
-                                 initial={{ height: 0, opacity: 0 }}
-                                 animate={{ height: "auto", opacity: 1 }}
-                                 className="prose prose-sm prose-warm-ink mt-3"
-                               >
-                                 <Markdown>{section.researchBrief}</Markdown>
-                               </motion.div>
-                             )}
+                        <div className="bg-accent/[0.03] border border-accent/10 rounded-3xl p-6 text-sm text-warm-ink/60 font-sans leading-relaxed">
+                          <div className="flex items-center justify-between">
+                            <h5 className="text-[10px] font-bold uppercase tracking-widest text-accent flex items-center gap-2 group-hover:text-accent/80 transition-colors">
+                              {researchingIndex === idx || sectionResearchUploading[section.id] ? (
+                                <Loader2 className="w-3 h-3 animate-spin text-emerald-600" />
+                              ) : (
+                                <Search className="w-3 h-3" />
+                              )}
+                              Research Brief {section.researchBrief ? "(Editable)" : "(Empty)"}
+                            </h5>
+                            <div className="flex items-center gap-2">
+                              {/* Single section PDF/DOCX/TXT upload button */}
+                              <label className="flex items-center gap-1.5 px-3 py-1 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 border border-emerald-200 rounded-full text-[10px] font-black uppercase tracking-wider cursor-pointer hover:scale-105 active:scale-95 transition-all">
+                                {sectionResearchUploading[section.id] ? (
+                                  <>
+                                    <Loader2 className="w-3 h-3 animate-spin" />
+                                    <span>Extracting...</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Import className="w-3 h-3" />
+                                    <span>Upload Research PDF/Doc</span>
+                                  </>
+                                )}
+                                <input 
+                                  type="file" 
+                                  className="hidden" 
+                                  accept=".pdf,.doc,.docx,.txt" 
+                                  disabled={sectionResearchUploading[section.id]}
+                                  onChange={(e) => handleSectionResearchFileUpload(section.id, e)} 
+                                />
+                              </label>
+
+                              <button 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setCollapsedResearch(prev => ({ ...prev, [section.id]: !prev[section.id] }));
+                                }}
+                                className="p-1 hover:bg-accent/10 rounded-md transition-colors"
+                              >
+                                {collapsedResearch[section.id] ? <ChevronDown className="w-3.5 h-3.5 text-accent" /> : <ChevronUp className="w-3.5 h-3.5 text-accent" />}
+                              </button>
+                            </div>
                           </div>
-                        )}
+
+                          {!collapsedResearch[section.id] && (
+                            <motion.div 
+                              initial={{ height: 0, opacity: 0 }}
+                              animate={{ height: "auto", opacity: 1 }}
+                              className="mt-4 space-y-3"
+                            >
+                              <EditableText
+                                label="Research Brief"
+                                value={section.researchBrief || ""}
+                                onChange={(v) => updateSection(section.id, { researchBrief: v })}
+                                className="text-sm text-warm-ink/80 prose prose-sm prose-warm-ink max-w-none"
+                                multiline
+                                markdown
+                              />
+
+                              {!section.researchBrief && (
+                                <p className="text-[10px] text-warm-ink/40 leading-relaxed italic">
+                                  No research facts loaded for this section yet. You can paste custom research facts directly into the box above, or upload a research PDF/document to analyze and auto-dossier this section.
+                                </p>
+                              )}
+                            </motion.div>
+                          )}
+                        </div>
 
                         {/* Narrative Output */}
                         {section.narrative && (
@@ -4865,8 +6169,8 @@ ${(s.whatNotToInclude || s.exclusions || []).map(e => `- ${e}`).join("\n")}
                 <div className="w-12 h-12 bg-accent/10 text-accent rounded-full flex items-center justify-center mx-auto mb-4">
                   <RotateCcw className="w-6 h-6" />
                 </div>
-                <h3 className="text-xl font-serif font-bold text-warm-ink">Start a New Story?</h3>
-                <p className="text-sm text-warm-ink/60 font-sans">This will clear your current retelling progress. This action cannot be undone.</p>
+                <h3 className="text-xl font-serif font-bold text-warm-ink">Start a New Case or Story?</h3>
+                <p className="text-sm text-warm-ink/60 font-sans">This will clear your current retelling and outline progress across all phases. This action cannot be undone.</p>
               </div>
 
               <div className="flex flex-col gap-3 pt-2">
